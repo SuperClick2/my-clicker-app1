@@ -1,63 +1,83 @@
-from flask import Flask, request
-from flask_socketio import SocketIO, emit, disconnect
-import eventlet
+from flask import Flask, render_template
+from flask_socketio import SocketIO, emit
+import random
 import threading
-import time
-
-eventlet.monkey_patch()
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SECRET_KEY'] = 'secret!'
+socketio = SocketIO(app, cors_allowed_origins="*")  # Разрешаем кросс-доменные запросы
+#socketio = SocketIO(app, cors_allowed_origins="https://my-clicker-app1.onrender.com")  # Укажите ваш домен
 
 players = {}
-food = [{'x': 100, 'y': 100}, {'x': 400, 'y': 300}, {'x': 200, 'y': 400}]
+player_names = set()
+WIDTH = 800
+HEIGHT = 600
+
+def generate_random_position():
+    return {'x': random.randint(0, WIDTH), 'y': random.randint(0, HEIGHT)}
+
+
+def check_collision(x, y, radius=15):
+    """Проверка столкновения с границами окна."""
+    return not (radius <= x <= WIDTH - radius and radius <= y <= HEIGHT - radius)
+
 
 @socketio.on('connect')
 def handle_connect():
-    print(f'[SERVER] Клиент подключился: {request.sid}')
+    print('Client connected')
 
-@socketio.on('join')
-def handle_join(data):
-    name = data.get('name')
-    print(f'[SERVER] Join от игрока: {name}')
-    if not name or name in players:
-        emit('error', {'message': 'Имя уже используется или некорректно'})
-        disconnect()
+@socketio.on('new_player')
+def handle_new_player(name):
+    if name in player_names:
+        emit('name_taken')
         return
-    players[name] = {'x': 0, 'y': 0, 'r': 15}
-    emit('join_success', {'food': food})
-    print(f'[SERVER] Игрок {name} добавлен')
 
-@socketio.on('update')
-def handle_update(data):
-    name = data.get('name')
-    if name in players:
-        players[name].update({
-            'x': data.get('x', players[name]['x']),
-            'y': data.get('y', players[name]['y']),
-            'r': data.get('r', players[name]['r']),
-        })
+    player_names.add(name)
+    player_id = request.sid  # ID клиента из сокета
+    position = generate_random_position()
 
-@socketio.on('eat')
-def handle_eat(data):
-    eater = data.get('eater')
-    eaten = data.get('eaten')
-    if eater in players and eaten in players:
-        if players[eater]['r'] > players[eaten]['r']:
-            players[eater]['r'] += players[eaten]['r'] // 2
-            del players[eaten]
-            emit('killed', {'victim': eaten, 'killer': eater}, broadcast=True)
+    players[player_id] = {'name': name, 'x': position['x'], 'y': position['y'], 'color': f'rgb({random.randint(0, 255)}, {random.randint(0, 255)}, {random.randint(0, 255)})'}
+
+    emit('init_player', {'id': player_id, 'x': position['x'], 'y': position['y'], 'color': players[player_id]['color']}, room=player_id) # Инициализация для этого игрока
+    emit('current_players', players, room=player_id)  # Отправляем текущих игроков ему
+    emit('new_player_joined', players[player_id], broadcast=True, include_self=False)  # Сообщаем другим о новом игроке
+    print(f'New player {name} joined with id {player_id}')
+
+
+@socketio.on('move')
+def handle_move(data):
+    player_id = request.sid
+    x = data['x']
+    y = data['y']
+
+    # Проверка на границы экрана
+    if check_collision(x, y):
+        # Вернуть игрока на предыдущую позицию или не давать двигаться.
+        emit('invalid_move', room=player_id)
+        return
+
+    if player_id in players:
+        players[player_id]['x'] = x
+        players[player_id]['y'] = y
+        emit('player_moved', {'id': player_id, 'x': x, 'y': y}, broadcast=True, include_self=False)  # Сообщаем другим об изменении позиции
+
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print(f'[SERVER] Клиент отключился: {request.sid}')
-    # Удалить игрока по sid нет, нужен поиск по players, можно усложнить если надо.
+    player_id = request.sid
+    if player_id in players:
+        name = players[player_id]['name']
+        del players[player_id]
+        player_names.remove(name)
+        emit('player_left', player_id, broadcast=True)
+        print(f'Player {name} disconnected')
 
-def game_update_loop():
-    while True:
-        socketio.emit('state', {'players': players, 'food': food})
-        socketio.sleep(1/30)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
 
 if __name__ == '__main__':
-    socketio.start_background_task(game_update_loop)
-    socketio.run(app, host='0.0.0.0', port=5000)
+    #socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
