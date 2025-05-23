@@ -9,8 +9,8 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 players = {}
-foods = []
 sid_to_name = {}
+foods = []
 MAP_WIDTH, MAP_HEIGHT = 2000, 2000
 MAX_FOOD = 150
 
@@ -23,31 +23,39 @@ def spawn_food():
         })
 
 @socketio.on('connect')
-def handle_connect():
+def on_connect():
     print(f"Client connected: {request.sid}")
 
 @socketio.on('join')
-def handle_join(data):
+def on_join(data):
     name = data['name']
+    # Проверяем, есть ли уже игрок с таким именем и отключаем его, если да
     if name in players:
-        emit('join_response', {'success': False, 'name': name})
-    else:
-        players[name] = {
-            'x': random.randint(100, MAP_WIDTH - 100),
-            'y': random.randint(100, MAP_HEIGHT - 100),
-            'size': 10,
-            'last_active': time.time()
-        }
-        sid_to_name[request.sid] = name
-        emit('join_response', {'success': True, 'name': name})
-        print(f"{name} joined.")
+        old_sid = None
+        for sid, n in sid_to_name.items():
+            if n == name:
+                old_sid = sid
+                break
+        if old_sid:
+            print(f"Kick old player {name} with sid {old_sid}")
+            socketio.server.disconnect(old_sid)
+
+    # Регистрируем нового игрока
+    players[name] = {
+        'x': random.randint(100, MAP_WIDTH - 100),
+        'y': random.randint(100, MAP_HEIGHT - 100),
+        'size': 10,
+        'last_active': time.time()
+    }
+    sid_to_name[request.sid] = name
+    emit('join_response', {'success': True, 'name': name})
+    print(f"{name} joined with sid {request.sid}")
 
 @socketio.on('update')
-def handle_update(data):
-    name = data['name']
-    if name not in players:
+def on_update(data):
+    name = data.get('name')
+    if not name or name not in players:
         return
-
     players[name]['x'] = data['x']
     players[name]['y'] = data['y']
     players[name]['size'] = data['size']
@@ -73,28 +81,37 @@ def handle_update(data):
                 emit('death', {'killed_by': name}, to=other_name)
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def on_disconnect():
     sid = request.sid
-    print(f"Client disconnected: {sid}")
     name = sid_to_name.get(sid)
-    if name and name in players:
-        del players[name]
-        print(f"Removed player {name} on disconnect.")
-    if sid in sid_to_name:
-        del sid_to_name[sid]
+    if name:
+        print(f"{name} disconnected, removing from players.")
+        players.pop(name, None)
+        sid_to_name.pop(sid, None)
+    else:
+        print(f"Unknown sid disconnected: {sid}")
 
 def game_loop():
     while True:
         spawn_food()
         now = time.time()
-        for name in list(players):
-            if now - players[name]['last_active'] > 10:
-                print(f"{name} timed out.")
-                del players[name]
-        socketio.emit('game_state', {
-            'players': players,
-            'foods': foods
-        })
+        to_remove = []
+        for name, p in players.items():
+            if now - p['last_active'] > 10:
+                print(f"Player {name} timed out, removing.")
+                to_remove.append(name)
+        for name in to_remove:
+            players.pop(name, None)
+            # Удаляем sid, связанный с этим именем
+            sid_to_remove = None
+            for sid, n in sid_to_name.items():
+                if n == name:
+                    sid_to_remove = sid
+                    break
+            if sid_to_remove:
+                sid_to_name.pop(sid_to_remove, None)
+
+        socketio.emit('game_state', {'players': players, 'foods': foods})
         socketio.sleep(0.05)
 
 if __name__ == '__main__':
