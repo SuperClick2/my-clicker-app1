@@ -1,35 +1,34 @@
 import asyncio
-import json
-import websockets
+import socketio
+from aiohttp import web
 
-players = {}  # { name: {"x": ..., "y": ..., "color": ...} }
+sio = socketio.AsyncServer(cors_allowed_origins='*')
+app = web.Application()
+sio.attach(app)
+
+players = {}  # sid: {'x': int, 'y': int, 'color': (r, g, b)}
 
 WIDTH, HEIGHT = 800, 600
 
-async def handler(websocket):
-    global players
-    name = await websocket.recv()
-    if name in players:
-        await websocket.send(json.dumps({"error": "Имя уже занято"}))
-        return
+@sio.event
+async def connect(sid, environ):
+    print(f"Player connected: {sid}")
+    players[sid] = {'x': WIDTH // 2, 'y': HEIGHT // 2, 'color': (255, 0, 0)}
+    await sio.emit('players_update', players)
 
-    players[name] = {"x": WIDTH // 2, "y": HEIGHT // 2, "color": [255, 0, 0]}
-    await websocket.send(json.dumps({"ok": True}))
-    try:
-        async for message in websocket:
-            data = json.loads(message)
-            if "x" in data and "y" in data:
-                players[name]["x"] = max(0, min(WIDTH, data["x"]))
-                players[name]["y"] = max(0, min(HEIGHT, data["y"]))
-            await websocket.send(json.dumps(players))
-    except:
-        pass
-    finally:
-        del players[name]
+@sio.event
+async def disconnect(sid):
+    print(f"Player disconnected: {sid}")
+    players.pop(sid, None)
+    await sio.emit('players_update', players)
 
-async def main():
-    async with websockets.serve(handler, "localhost", 8765):
-        print("Server started on ws://localhost:8765")
-        await asyncio.Future()  # run forever
+@sio.event
+async def move(sid, data):
+    player = players.get(sid)
+    if player:
+        player['x'] = max(0, min(WIDTH, player['x'] + data.get('dx', 0)))
+        player['y'] = max(0, min(HEIGHT, player['y'] + data.get('dy', 0)))
+        await sio.emit('players_update', players)
 
-asyncio.run(main())
+if __name__ == '__main__':
+    web.run_app(app, port=5000)
