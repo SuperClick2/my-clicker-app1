@@ -1,16 +1,19 @@
 from flask import Flask, request
-from flask_socketio import SocketIO, emit, disconnect
+from flask_socketio import SocketIO, emit
 import time, threading, random
+import eventlet
+
+eventlet.monkey_patch()
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins='*')
+socketio = SocketIO(app, cors_allowed_origins='*', async_mode='eventlet')
 
 players = {}
 food = []
 FOOD_COUNT = 100
 
 def spawn_food():
-    for _ in range(FOOD_COUNT - len(food)):
+    while len(food) < FOOD_COUNT:
         food.append({
             "x": random.randint(0, 2000),
             "y": random.randint(0, 2000)
@@ -30,20 +33,21 @@ def on_join(data):
         'x': random.randint(100, 1900),
         'y': random.randint(100, 1900),
         'r': 15,
-        'last_seen': time.time()
+        'last_seen': time.time(),
+        'sid': request.sid
     }
     emit('join_success', {'food': food})
-    print(f'{name} joined.')
+    print(f'[JOIN] {name}')
+    socketio.emit('player_joined', {'name': name}, broadcast=True)
 
 @socketio.on('update')
 def on_update(data):
     name = data['name']
-    if name not in players:
-        return
-    players[name]['x'] = data['x']
-    players[name]['y'] = data['y']
-    players[name]['r'] = data['r']
-    players[name]['last_seen'] = time.time()
+    if name in players:
+        players[name]['x'] = data['x']
+        players[name]['y'] = data['y']
+        players[name]['r'] = data['r']
+        players[name]['last_seen'] = time.time()
 
 @socketio.on('eat')
 def on_eat(data):
@@ -53,25 +57,35 @@ def on_eat(data):
         if players[eater]['r'] > players[eaten]['r']:
             players[eater]['r'] += players[eaten]['r'] // 2
             del players[eaten]
-            emit('killed', {'killer': eater, 'victim': eaten}, broadcast=True)
+            socketio.emit('killed', {'killer': eater, 'victim': eaten}, broadcast=True)
+            print(f"[KILL] {eater} съел {eaten}")
 
 @socketio.on('disconnect')
 def on_disconnect():
-    for name, player in list(players.items()):
-        if request.sid == player.get('sid'):
-            del players[name]
+    to_remove = None
+    for name, p in players.items():
+        if p['sid'] == request.sid:
+            to_remove = name
+            break
+    if to_remove:
+        print(f'[DISCONNECT] {to_remove}')
+        del players[to_remove]
 
 def cleanup():
     while True:
         now = time.time()
         for name in list(players):
             if now - players[name]['last_seen'] > 10:
-                print(f"{name} timed out.")
+                print(f"[TIMEOUT] {name}")
                 del players[name]
         spawn_food()
         socketio.emit('state', {'players': players, 'food': food})
-        time.sleep(0.05)
+        eventlet.sleep(0.05)
+
+@app.route('/')
+def index():
+    return "Server is running."
 
 if __name__ == '__main__':
     threading.Thread(target=cleanup, daemon=True).start()
-    socketio.run(app, host='0.0.0.0', port=5000)
+    socketio.run(app, host='0.0.0.0', port=10000)
