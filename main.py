@@ -69,8 +69,8 @@ def handle_disconnect():
 
 def update_loop():
     while True:
-        socketio.sleep(0.05)
-        emit('state', {
+        socketio.sleep(0.05)  # 20 FPS
+        socketio.emit('state', {
             'players': {name: {'x': p['x'], 'y': p['y'], 'r': p['r']} for name, p in players.items()},
             'food': food
         })
