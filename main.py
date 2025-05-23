@@ -3,6 +3,8 @@ from flask_socketio import SocketIO, emit, disconnect
 import random
 import eventlet
 
+eventlet.monkey_patch()
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
@@ -12,7 +14,7 @@ food = [{'x': random.randint(0, 2000), 'y': random.randint(0, 2000)} for _ in ra
 
 @socketio.on('connect')
 def handle_connect():
-    print(f'[SERVER] Подключился клиент: {request.sid}')
+    print(f'[SERVER] Клиент подключился: {request.sid}')
 
 @socketio.on('join')
 def handle_join(data):
@@ -31,9 +33,9 @@ def handle_join(data):
         'sid': sid
     }
 
-    print(f'[SERVER] {name} присоединился к игре')
+    print(f'[SERVER] Игрок {name} присоединился')
     emit('join_success', {'food': food}, to=sid)
-    emit('player_joined', {'name': name})
+    socketio.emit('player_joined', {'name': name})  # Рассылаем всем
 
 @socketio.on('update')
 def handle_update(data):
@@ -64,18 +66,18 @@ def handle_disconnect():
             break
     if name_to_remove:
         del players[name_to_remove]
-        print(f'[SERVER] {name_to_remove} отключился')
-        emit('player_left', {'name': name_to_remove})
+        print(f'[SERVER] Игрок {name_to_remove} отключился')
+        socketio.emit('player_left', {'name': name_to_remove})
 
 def update_loop():
     while True:
-        socketio.sleep(0.05)  # 20 FPS
+        socketio.sleep(0.05)  # примерно 20 обновлений в секунду
         socketio.emit('state', {
             'players': {name: {'x': p['x'], 'y': p['y'], 'r': p['r']} for name, p in players.items()},
             'food': food
         })
 
 if __name__ == '__main__':
-    print('[SERVER] Сервер запущен...')
+    print('[SERVER] Запуск сервера...')
     socketio.start_background_task(update_loop)
     socketio.run(app, host='0.0.0.0', port=10000)
