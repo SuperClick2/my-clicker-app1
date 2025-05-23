@@ -11,16 +11,16 @@ players = {}
 food = [{'x': random.randint(0, 2000), 'y': random.randint(0, 2000)} for _ in range(100)]
 
 @socketio.on('connect')
-def on_connect():
-    print('[SERVER] Новый клиент подключился:', request.sid)
+def handle_connect():
+    print(f'[SERVER] Подключился клиент: {request.sid}')
 
 @socketio.on('join')
-def on_join(data):
+def handle_join(data):
     sid = request.sid
     name = data.get('name')
 
-    if name in players:
-        emit('error', {'message': 'Имя уже используется'})
+    if not name or name in players:
+        emit('error', {'message': 'Имя уже используется или некорректно'})
         disconnect()
         return
 
@@ -31,26 +31,22 @@ def on_join(data):
         'sid': sid
     }
 
-    print(f'[SERVER] {name} присоединился')
+    print(f'[SERVER] {name} присоединился к игре')
     emit('join_success', {'food': food}, to=sid)
+    emit('player_joined', {'name': name})
 
 @socketio.on('update')
-def on_update(data):
+def handle_update(data):
     name = data.get('name')
     if name in players:
-        players[name]['x'] = data.get('x')
-        players[name]['y'] = data.get('y')
-        players[name]['r'] = data.get('r')
-        # Отправить всем обновлённое состояние
-        emit('state', {
-            'players': {k: {'x': v['x'], 'y': v['y'], 'r': v['r']} for k, v in players.items()},
-            'food': food
-        }, broadcast=True)
+        players[name]['x'] = data.get('x', players[name]['x'])
+        players[name]['y'] = data.get('y', players[name]['y'])
+        players[name]['r'] = data.get('r', players[name]['r'])
 
 @socketio.on('eat')
-def on_eat(data):
-    eater = data['eater']
-    eaten = data['eaten']
+def handle_eat(data):
+    eater = data.get('eater')
+    eaten = data.get('eaten')
     if eater in players and eaten in players:
         if players[eater]['r'] > players[eaten]['r']:
             players[eater]['r'] += players[eaten]['r'] // 2
@@ -59,28 +55,27 @@ def on_eat(data):
             print(f"[SERVER] {eater} съел {eaten}")
 
 @socketio.on('disconnect')
-def on_disconnect():
+def handle_disconnect():
     sid = request.sid
-    to_remove = None
-    for name, pdata in players.items():
-        if pdata['sid'] == sid:
-            to_remove = name
+    name_to_remove = None
+    for name, info in players.items():
+        if info['sid'] == sid:
+            name_to_remove = name
             break
-    if to_remove:
-        del players[to_remove]
-        print(f"[SERVER] {to_remove} отключился")
+    if name_to_remove:
+        del players[name_to_remove]
+        print(f'[SERVER] {name_to_remove} отключился')
+        emit('player_left', {'name': name_to_remove})
 
-# Фоновый цикл обновления (опционально)
 def update_loop():
     while True:
         socketio.sleep(0.05)
         emit('state', {
-            'players': {k: {'x': v['x'], 'y': v['y'], 'r': v['r']} for k, v in players.items()},
+            'players': {name: {'x': p['x'], 'y': p['y'], 'r': p['r']} for name, p in players.items()},
             'food': food
-        }, broadcast=True)
+        })
 
-# Запуск сервера
 if __name__ == '__main__':
-    print("[SERVER] Запуск...")
+    print('[SERVER] Сервер запущен...')
     socketio.start_background_task(update_loop)
-    socketio.run(app, host="0.0.0.0", port=10000)
+    socketio.run(app, host='0.0.0.0', port=10000)
