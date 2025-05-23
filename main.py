@@ -41,9 +41,10 @@ def handle_new_player(name):
 
     player_names.add(name)
     position = generate_random_position()
+    color = f'rgb({random.randint(0, 255)}, {random.randint(0, 255)}, {random.randint(0, 255)})'
 
     players[player_id] = {'name': name, 'x': position['x'], 'y': position['y'],
-                          'color': f'rgb({random.randint(0, 255)}, {random.randint(0, 255)}, {random.randint(0, 255)})'}
+                          'color': color, 'id': player_id}  # Add 'id' here
 
     # Отправляем только этому клиенту его данные
     emit('init_player', players[player_id], room=player_id)
@@ -61,11 +62,16 @@ def handle_new_player(name):
 @socketio.on('move')
 def handle_move(data):
     player_id = request.sid
-    x = data['x']
-    y = data['y']
+    x = data.get('x')
+    y = data.get('y')
+
+    if x is None or y is None:
+        logging.warning(f"Invalid move data received from {player_id}: {data}")
+        return
 
     if check_collision(x, y):
         emit('invalid_move', room=player_id)
+        logging.debug(f"Invalid move attempted by {player_id} to x={x}, y={y} (collision)")
         return
 
     if player_id in players:
@@ -73,6 +79,8 @@ def handle_move(data):
         players[player_id]['y'] = y
         emit('player_moved', {'id': player_id, 'x': x, 'y': y}, broadcast=True, include_self=False)
         logging.debug(f"Player {player_id} moved to x={x}, y={y}")
+    else:
+        logging.warning(f"Move received from unknown player {player_id}")
 
 
 @socketio.on('disconnect')
