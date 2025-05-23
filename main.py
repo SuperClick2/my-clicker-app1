@@ -1,8 +1,7 @@
-# server.py
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask
+from flask import Flask, request
 from flask_socketio import SocketIO, emit
 import time, random
 
@@ -11,6 +10,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 players = {}
 foods = []
+sid_to_name = {}
 MAP_WIDTH, MAP_HEIGHT = 2000, 2000
 MAX_FOOD = 150
 
@@ -24,13 +24,13 @@ def spawn_food():
 
 @socketio.on('connect')
 def handle_connect():
-    print("Client connected.")
+    print(f"Client connected: {request.sid}")
 
 @socketio.on('join')
 def handle_join(data):
     name = data['name']
     if name in players:
-        emit('join_response', {'success': False})
+        emit('join_response', {'success': False, 'name': name})
     else:
         players[name] = {
             'x': random.randint(100, MAP_WIDTH - 100),
@@ -38,7 +38,8 @@ def handle_join(data):
             'size': 10,
             'last_active': time.time()
         }
-        emit('join_response', {'success': True})
+        sid_to_name[request.sid] = name
+        emit('join_response', {'success': True, 'name': name})
         print(f"{name} joined.")
 
 @socketio.on('update')
@@ -73,8 +74,14 @@ def handle_update(data):
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print("Client disconnected.")
-    # Игрок удалится по тайм-ауту в game_loop
+    sid = request.sid
+    print(f"Client disconnected: {sid}")
+    name = sid_to_name.get(sid)
+    if name and name in players:
+        del players[name]
+        print(f"Removed player {name} on disconnect.")
+    if sid in sid_to_name:
+        del sid_to_name[sid]
 
 def game_loop():
     while True:
