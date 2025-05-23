@@ -1,16 +1,16 @@
 from flask import Flask, request
 from flask_socketio import SocketIO, emit, disconnect
-import random
 import eventlet
+import threading
+import time
 
 eventlet.monkey_patch()
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 players = {}
-food = [{'x': random.randint(0, 2000), 'y': random.randint(0, 2000)} for _ in range(100)]
+food = [{'x': 100, 'y': 100}, {'x': 400, 'y': 300}, {'x': 200, 'y': 400}]
 
 @socketio.on('connect')
 def handle_connect():
@@ -18,32 +18,25 @@ def handle_connect():
 
 @socketio.on('join')
 def handle_join(data):
-    sid = request.sid
     name = data.get('name')
-
+    print(f'[SERVER] Join от игрока: {name}')
     if not name or name in players:
         emit('error', {'message': 'Имя уже используется или некорректно'})
         disconnect()
         return
-
-    players[name] = {
-        'x': 1000,
-        'y': 1000,
-        'r': 15,
-        'sid': sid
-    }
-
-    print(f'[SERVER] Игрок {name} присоединился')
-    emit('join_success', {'food': food}, to=sid)
-    socketio.emit('player_joined', {'name': name})  # Рассылаем всем
+    players[name] = {'x': 0, 'y': 0, 'r': 15}
+    emit('join_success', {'food': food})
+    print(f'[SERVER] Игрок {name} добавлен')
 
 @socketio.on('update')
 def handle_update(data):
     name = data.get('name')
     if name in players:
-        players[name]['x'] = data.get('x', players[name]['x'])
-        players[name]['y'] = data.get('y', players[name]['y'])
-        players[name]['r'] = data.get('r', players[name]['r'])
+        players[name].update({
+            'x': data.get('x', players[name]['x']),
+            'y': data.get('y', players[name]['y']),
+            'r': data.get('r', players[name]['r']),
+        })
 
 @socketio.on('eat')
 def handle_eat(data):
@@ -52,32 +45,19 @@ def handle_eat(data):
     if eater in players and eaten in players:
         if players[eater]['r'] > players[eaten]['r']:
             players[eater]['r'] += players[eaten]['r'] // 2
-            emit('killed', {'killer': eater, 'victim': eaten}, to=players[eaten]['sid'])
             del players[eaten]
-            print(f"[SERVER] {eater} съел {eaten}")
+            emit('killed', {'victim': eaten, 'killer': eater}, broadcast=True)
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    sid = request.sid
-    name_to_remove = None
-    for name, info in players.items():
-        if info['sid'] == sid:
-            name_to_remove = name
-            break
-    if name_to_remove:
-        del players[name_to_remove]
-        print(f'[SERVER] Игрок {name_to_remove} отключился')
-        socketio.emit('player_left', {'name': name_to_remove})
+    print(f'[SERVER] Клиент отключился: {request.sid}')
+    # Удалить игрока по sid нет, нужен поиск по players, можно усложнить если надо.
 
-def update_loop():
+def game_update_loop():
     while True:
-        socketio.sleep(0.05)  # примерно 20 обновлений в секунду
-        socketio.emit('state', {
-            'players': {name: {'x': p['x'], 'y': p['y'], 'r': p['r']} for name, p in players.items()},
-            'food': food
-        })
+        socketio.emit('state', {'players': players, 'food': food})
+        socketio.sleep(1/30)
 
 if __name__ == '__main__':
-    print('[SERVER] Запуск сервера...')
-    socketio.start_background_task(update_loop)
-    socketio.run(app, host='0.0.0.0', port=10000)
+    socketio.start_background_task(game_update_loop)
+    socketio.run(app, host='0.0.0.0', port=5000)
