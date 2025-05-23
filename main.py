@@ -1,119 +1,156 @@
-import eventlet
-eventlet.monkey_patch()
-
-from flask import Flask, request
+from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
-import time, random
+import random
+import time
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+app.config['SECRET_KEY'] = 'secret!'
+socketio = SocketIO(app, cors_allowed_origins="*")
 
+# Игровые данные
 players = {}
-sid_to_name = {}
 foods = []
-MAP_WIDTH, MAP_HEIGHT = 2000, 2000
-MAX_FOOD = 150
+game_width = 2000
+game_height = 2000
+food_count = 100
+next_player_id = 1
 
-def spawn_food():
-    while len(foods) < MAX_FOOD:
-        foods.append({
-            'x': random.randint(0, MAP_WIDTH),
-            'y': random.randint(0, MAP_HEIGHT),
-            'size': 5
-        })
+# Генерация еды
+def generate_food():
+    global foods
+    foods = [{
+        'id': i,
+        'x': random.randint(0, game_width),
+        'y': random.randint(0, game_height),
+        'size': random.randint(5, 10),
+        'color': (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    } for i in range(food_count)]
+
+generate_food()
 
 @socketio.on('connect')
-def on_connect():
-    print(f"Client connected: {request.sid}")
-
-@socketio.on('join')
-def on_join(data):
-    name = data['name']
-    # Проверяем, есть ли уже игрок с таким именем и отключаем его, если да
-    if name in players:
-        old_sid = None
-        for sid, n in sid_to_name.items():
-            if n == name:
-                old_sid = sid
-                break
-        if old_sid:
-            print(f"Kick old player {name} with sid {old_sid}")
-            socketio.server.disconnect(old_sid)
-
-    # Регистрируем нового игрока
-    players[name] = {
-        'x': random.randint(100, MAP_WIDTH - 100),
-        'y': random.randint(100, MAP_HEIGHT - 100),
-        'size': 10,
-        'last_active': time.time()
-    }
-    sid_to_name[request.sid] = name
-    emit('join_response', {'success': True, 'name': name})
-    print(f"{name} joined with sid {request.sid}")
-
-@socketio.on('update')
-def on_update(data):
-    name = data.get('name')
-    if not name or name not in players:
-        return
-    players[name]['x'] = data['x']
-    players[name]['y'] = data['y']
-    players[name]['size'] = data['size']
-    players[name]['last_active'] = time.time()
-
-    # Проверка еды
-    px, py, pr = data['x'], data['y'], data['size']
-    for f in foods[:]:
-        fx, fy = f['x'], f['y']
-        if (px - fx) ** 2 + (py - fy) ** 2 < (pr + f['size']) ** 2:
-            foods.remove(f)
-            players[name]['size'] += 1
-
-    # Проверка столкновений с другими игроками
-    for other_name, other in list(players.items()):
-        if other_name == name:
-            continue
-        ox, oy, os = other['x'], other['y'], other['size']
-        if (px - ox) ** 2 + (py - oy) ** 2 < (pr + os) ** 2:
-            if pr > os + 5:
-                players[name]['size'] += int(os / 2)
-                del players[other_name]
-                emit('death', {'killed_by': name}, to=other_name)
+def handle_connect():
+    print('Client connected:', request.sid)
 
 @socketio.on('disconnect')
-def on_disconnect():
+def handle_disconnect():
+    print('Client disconnected:', request.sid)
     sid = request.sid
-    name = sid_to_name.get(sid)
-    if name:
-        print(f"{name} disconnected, removing from players.")
-        players.pop(name, None)
-        sid_to_name.pop(sid, None)
-    else:
-        print(f"Unknown sid disconnected: {sid}")
+    if sid in players:
+        player_name = players[sid]['name']
+        del players[sid]
+        emit('player_disconnected', {'name': player_name}, broadcast=True)
 
-def game_loop():
-    while True:
-        spawn_food()
-        now = time.time()
-        to_remove = []
-        for name, p in players.items():
-            if now - p['last_active'] > 10:
-                print(f"Player {name} timed out, removing.")
-                to_remove.append(name)
-        for name in to_remove:
-            players.pop(name, None)
-            # Удаляем sid, связанный с этим именем
-            sid_to_remove = None
-            for sid, n in sid_to_name.items():
-                if n == name:
-                    sid_to_remove = sid
-                    break
-            if sid_to_remove:
-                sid_to_name.pop(sid_to_remove, None)
+@socketio.on('join_game')
+def handle_join_game(data):
+    global next_player_id
+    
+    name = data.get('name', '').strip()
+    sid = request.sid
+    
+    # Проверка на уникальность имени
+    if not name:
+        emit('join_error', {'message': 'Имя не может быть пустым'})
+        return
+    
+    for player in players.values():
+        if player['name'].lower() == name.lower():
+            emit('join_error', {'message': 'Имя уже занято'})
+            return
+    
+    # Создание нового игрока
+    player = {
+        'id': next_player_id,
+        'name': name,
+        'x': random.randint(0, game_width),
+        'y': random.randint(0, game_height),
+        'size': 20,
+        'color': (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
+        'score': 0,
+        'sid': sid
+    }
+    
+    players[sid] = player
+    next_player_id += 1
+    
+    # Отправляем новому игроку текущее состояние игры
+    emit('init_game', {
+        'player': player,
+        'foods': foods,
+        'players': [p for p in players.values() if p['sid'] != sid],
+        'game_width': game_width,
+        'game_height': game_height
+    })
+    
+    # Сообщаем всем о новом игроке
+    emit('new_player', player, broadcast=True)
 
-        socketio.emit('game_state', {'players': players, 'foods': foods})
-        socketio.sleep(0.05)
+@socketio.on('player_move')
+def handle_player_move(data):
+    sid = request.sid
+    if sid not in players:
+        return
+    
+    player = players[sid]
+    
+    # Обновляем позицию игрока
+    player['x'] = data['x']
+    player['y'] = data['y']
+    
+    # Проверяем столкновения с едой
+    for food in foods[:]:
+        dx = player['x'] - food['x']
+        dy = player['y'] - food['y']
+        distance = (dx**2 + dy**2)**0.5
+        
+        if distance < player['size']:
+            player['size'] += food['size'] * 0.2
+            player['score'] += 1
+            foods.remove(food)
+            emit('food_eaten', {'food_id': food['id']}, broadcast=True)
+            
+            # Добавляем новую еду
+            new_food = {
+                'id': max(f['id'] for f in foods) + 1 if foods else 0,
+                'x': random.randint(0, game_width),
+                'y': random.randint(0, game_height),
+                'size': random.randint(5, 10),
+                'color': (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+            }
+            foods.append(new_food)
+            emit('new_food', new_food, broadcast=True)
+    
+    # Проверяем столкновения с другими игроками
+    for other_sid, other_player in players.items():
+        if other_sid == sid:
+            continue
+        
+        dx = player['x'] - other_player['x']
+        dy = player['y'] - other_player['y']
+        distance = (dx**2 + dy**2)**0.5
+        
+        # Если текущий игрок больше другого, он может его съесть
+        if distance < player['size'] and player['size'] > other_player['size'] * 1.1:
+            player['size'] += other_player['size'] * 0.2
+            player['score'] += other_player['score']
+            
+            # Удаляем съеденного игрока
+            del players[other_sid]
+            socketio.emit('player_eaten', {
+                'eater_id': player['id'],
+                'eaten_id': other_player['id'],
+                'eater_name': player['name'],
+                'eaten_name': other_player['name']
+            }, broadcast=True)
+            
+            # Отправляем сообщение о смерти съеденному игроку
+            socketio.emit('you_died', {
+                'killer_name': player['name']
+            }, room=other_sid)
+    
+    # Отправляем обновленное состояние игрока всем
+    emit('player_update', player, broadcast=True)
 
 if __name__ == '__main__':
-    socketio.start_background_task(game_loop)
-    socketio.run(app, host='0.0.0.0', port=8080)
+    print("Starting server on http://localhost:5000")
+    socketio.run(app, host='0.0.0.0', port=5000)
