@@ -1,7 +1,6 @@
 import asyncio
 import random
 import uuid
-import time
 from typing import Dict, List
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -24,9 +23,7 @@ BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
 BOT_SPEED = 5
-PLAYER_SPEED = 5
-MAX_ALLOWED_SPEED = 10  # Максимальная разрешенная скорость для анти-чита
-BOT_RESPAWN_TIME = 2  # Время респавна ботов в секундах
+BOT_RESPAWN_TIME = 2  # Время возрождения бота в секундах
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -34,8 +31,7 @@ foods: List[dict] = []
 portals: List[dict] = []
 connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
-player_last_positions: Dict[str, dict] = {}
-player_last_move_times: Dict[str, float] = {}
+bot_respawn_tasks: Dict[str, asyncio.Task] = {}
 
 def generate_food():
     return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
@@ -54,7 +50,7 @@ def calculate_mass_loss(current_mass):
     loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
     return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
 
-async def respawn_bot(bot_name):
+async def respawn_bot(bot_name: str):
     await asyncio.sleep(BOT_RESPAWN_TIME)
     bots[bot_name] = {
         "id": str(uuid.uuid4()),
@@ -67,6 +63,7 @@ async def respawn_bot(bot_name):
         "mass_loss_timer": 0,
         "bot": True
     }
+    bot_respawn_tasks.pop(bot_name, None)
 
 async def bot_behavior():
     while True:
@@ -137,16 +134,20 @@ async def bot_behavior():
                     foods.remove(closest_target)
                     bot["r"] += 1
                 elif not is_food and min_dist < bot["r"] and closest_target["r"] < bot["r"] - 5:
-                    if closest_target["name"] in bots:
-                        # Убийство бота
-                        bots[closest_target["name"]]["dead"] = True
-                        asyncio.create_task(respawn_bot(closest_target["name"]))
-                    else:
-                        players[closest_target["name"]]["dead"] = True
+                    # Удаление съеденного объекта
+                    eater_name = bot_name
+                    eaten_name = closest_target["name"]
+                    
+                    if eaten_name in bots:
+                        bots[eaten_name]["dead"] = True
+                        if eaten_name not in bot_respawn_tasks:
+                            bot_respawn_tasks[eaten_name] = asyncio.create_task(respawn_bot(eaten_name))
+                    elif eaten_name in players:
+                        players[eaten_name]["dead"] = True
                         try:
-                            await connections[closest_target["name"]].send_json({
+                            await connections[eaten_name].send_json({
                                 "type": "death",
-                                "killer": bot_name
+                                "killer": eater_name
                             })
                         except:
                             pass
@@ -159,8 +160,8 @@ async def bot_behavior():
                         try:
                             await ws_conn.send_json({
                                 "type": "eat",
-                                "eater": bot_name,
-                                "eaten": closest_target["name"]
+                                "eater": eater_name,
+                                "eaten": eaten_name
                             })
                         except:
                             pass
@@ -182,7 +183,7 @@ async def game_loop():
 
         # Потеря массы для больших игроков и ботов
         for entity in list(players.values()) + list(bots.values()):
-            if entity["r"] >= MASS_LOSS_THRESHOLD and not entity["dead"]:
+            if not entity.get("dead", False) and entity["r"] >= MASS_LOSS_THRESHOLD:
                 now = datetime.now().timestamp()
                 if "mass_loss_timer" not in entity or now - entity["mass_loss_timer"] >= MASS_LOSS_INTERVAL:
                     mass_loss = calculate_mass_loss(entity["r"])
@@ -215,7 +216,7 @@ async def game_loop():
                     portals.remove(portal)
 
         # Отправка обновлений всем игрокам
-        all_players = {**players, **bots}
+        all_players = {k: v for k, v in {**players, **bots}.items() if not v.get("dead", False)}
         for name, ws in list(connections.items()):
             try:
                 await ws.send_json({
@@ -252,6 +253,8 @@ async def lifespan(app: FastAPI):
     yield
     game_task.cancel()
     bot_task.cancel()
+    for task in bot_respawn_tasks.values():
+        task.cancel()
     try:
         await game_task
         await bot_task
@@ -259,37 +262,6 @@ async def lifespan(app: FastAPI):
         pass
 
 app = FastAPI(lifespan=lifespan)
-
-def check_speed_hack(player_name, dx, dy):
-    """Проверка на читерство со скоростью"""
-    current_time = time.time()
-    last_time = player_last_move_times.get(player_name, current_time)
-    time_diff = current_time - last_time
-    
-    # Сохраняем текущее время
-    player_last_move_times[player_name] = current_time
-    
-    # Если время между движениями слишком мало, игнорируем проверку
-    if time_diff < 0.01:
-        return False
-    
-    # Получаем последнюю позицию
-    last_pos = player_last_positions.get(player_name, {"x": players[player_name]["x"], "y": players[player_name]["y"]})
-    
-    # Рассчитываем фактическое перемещение
-    actual_dx = players[player_name]["x"] - last_pos["x"]
-    actual_dy = players[player_name]["y"] - last_pos["y"]
-    
-    # Сохраняем новую позицию
-    player_last_positions[player_name] = {"x": players[player_name]["x"], "y": players[player_name]["y"]}
-    
-    # Рассчитываем скорость
-    speed = (actual_dx**2 + actual_dy**2)**0.5 / time_diff
-    
-    # Если скорость превышает максимально допустимую
-    if speed > MAX_ALLOWED_SPEED:
-        return True
-    return False
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -319,27 +291,12 @@ async def websocket_endpoint(websocket: WebSocket):
             "mass_loss_timer": 0
         }
         connections[name] = websocket
-        player_last_positions[name] = {"x": players[name]["x"], "y": players[name]["y"]}
-        player_last_move_times[name] = time.time()
 
         # Игровой цикл для конкретного игрока
         while True:
             msg = await websocket.receive_json()
             if msg["type"] == "move" and not players[name]["dead"]:
                 dx, dy = msg["dx"], msg["dy"]
-                
-                # Проверка на читерство со скоростью
-                if check_speed_hack(name, dx, dy):
-                    print(f"Игрок {name} подозревается в использовании читов скорости!")
-                    continue
-                
-                # Ограничение скорости
-                speed = (dx**2 + dy**2)**0.5
-                if speed > PLAYER_SPEED:
-                    factor = PLAYER_SPEED / speed
-                    dx *= factor
-                    dy *= factor
-                
                 players[name]["x"] += dx
                 players[name]["y"] += dy
 
@@ -359,34 +316,37 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 # Съедание других игроков/ботов
                 for other_name, other in list({**players, **bots}.items()):
-                    if other_name != name and not other["dead"]:
+                    if other_name != name and not other.get("dead", False):
                         dist = ((players[name]["x"] - other["x"])**2 + (players[name]["y"] - other["y"])**2)**0.5
                         if dist < players[name]["r"] and players[name]["r"] > other["r"] + 5:
-                            # Увеличение массы
-                            players[name]["r"] += int(other["r"] * 0.6)
-
+                            # Удаление съеденного объекта
+                            eater_name = name
+                            eaten_name = other_name
+                            
                             if other_name in bots:
-                                # Убийство бота
-                                bots[other_name]["dead"] = True
-                                asyncio.create_task(respawn_bot(other_name))
-                            else:
-                                # Убийство игрока
-                                players[other_name]["dead"] = True
+                                bots[eaten_name]["dead"] = True
+                                if eaten_name not in bot_respawn_tasks:
+                                    bot_respawn_tasks[eaten_name] = asyncio.create_task(respawn_bot(eaten_name))
+                            elif other_name in players:
+                                players[eaten_name]["dead"] = True
                                 try:
-                                    await connections[other_name].send_json({
+                                    await connections[eaten_name].send_json({
                                         "type": "death",
-                                        "killer": name
+                                        "killer": eater_name
                                     })
                                 except:
                                     pass
-
+                            
+                            # Увеличение массы игрока
+                            players[name]["r"] += int(other["r"] * 0.6)
+                            
                             # Отправка сообщения о съедении
                             for ws_name, ws_conn in list(connections.items()):
                                 try:
                                     await ws_conn.send_json({
                                         "type": "eat",
-                                        "eater": name,
-                                        "eaten": other_name
+                                        "eater": eater_name,
+                                        "eaten": eaten_name
                                     })
                                 except:
                                     pass
@@ -404,10 +364,6 @@ async def disconnect(name: str):
         del connections[name]
     if name in players:
         del players[name]
-    if name in player_last_positions:
-        del player_last_positions[name]
-    if name in player_last_move_times:
-        del player_last_move_times[name]
 
 if __name__ == "__main__":
     import uvicorn
