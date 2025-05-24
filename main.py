@@ -1,279 +1,265 @@
-import pygame
-import threading
-import websocket
-import json
-import time
+import asyncio
 import random
+import uuid
+from typing import Dict, List
 
-WIDTH, HEIGHT = 800, 600
-FPS = 60
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
 
-SERVER_URL = "wss://my-clicker-app1.onrender.com/ws"
+MAP_WIDTH = 2000
+MAP_HEIGHT = 2000
+MAX_FOOD = 100
 
-pygame.init()
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Agar Multiplayer")
-font = pygame.font.SysFont("arial", 24)
+players: Dict[str, dict] = {}
+foods: List[dict] = []
+connections: Dict[str, WebSocket] = {}
 
-player = {"x": 0, "y": 0, "r": 10, "name": ""}
-players = {}
-foods = []
-portals = []
-dead = False
-killer = ""
+portals: List[dict] = []  # каждый портал: {"id": uuid, "type": 1 или 2, "x": int, "y": int}
+BOT_COUNT = 10
+bots: Dict[str, dict] = {}  # боты по имени
 
-eat_message = None
-eat_message_time = 0
+# Плавная потеря массы — храним таймер для каждого игрока
+mass_loss_timers: Dict[str, float] = {}
 
-kill_message = None
-kill_message_time = 0
+def generate_food():
+    return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
 
-clock = pygame.time.Clock()
+def generate_portal(portal_type: int):
+    return {
+        "id": str(uuid.uuid4()),
+        "type": portal_type,
+        "x": random.randint(50, MAP_WIDTH - 50),
+        "y": random.randint(50, MAP_HEIGHT - 50)
+    }
 
-WHITE = (255, 255, 255)
-GREEN = (0, 255, 0)
-BLUE = (100, 100, 255)
-RED = (255, 50, 50)
-GOLD = (255, 215, 0)
-BLACK = (0, 0, 0)
+def distance(a, b):
+    return ((a["x"] - b["x"])**2 + (a["y"] - b["y"])**2)**0.5
 
-ws = None
-connected = False
+async def game_loop():
+    global portals
 
-# Загрузка изображений порталов
-try:
-    portal_img = pygame.image.load("ortal.png").convert_alpha()
-    portal_img = pygame.transform.scale(portal_img, (40, 40))
-    portal2_img = pygame.image.load("ortal2.png").convert_alpha()
-    portal2_img = pygame.transform.scale(portal2_img, (40, 40))
-except Exception as e:
-    print("Ошибка загрузки изображений порталов:", e)
-    portal_img = None
-    portal2_img = None
-
-def ws_thread(name):
-    global ws, player, players, foods, dead, killer, connected, portals, eat_message, eat_message_time, kill_message, kill_message_time
-    try:
-        ws = websocket.WebSocket()
-        ws.connect(SERVER_URL)
-        ws.send(json.dumps({"type": "join", "name": name}))
-        connected = True
-
-        while True:
-            msg = json.loads(ws.recv())
-            if msg["type"] == "update":
-                players = msg["players"]
-                foods = msg["foods"]
-                portals = msg.get("portals", [])
-                if name in players:
-                    player = players[name]
-
-            elif msg["type"] == "death":
-                dead = True
-                killer = msg["killer"]
-
-            elif msg["type"] == "eat":
-                # Сообщение что кто-то съел кого-то
-                killer_name = msg["killer"]
-                victim_name = msg["victim"]
-                kill_message = f"{killer_name} съел {victim_name}"
-                kill_message_time = time.time()
-
-            elif msg["type"] == "food_eaten":
-                eater = msg["name"]
-                if eater == player["name"]:
-                    eat_message = "Ты съел еду!"
-                    eat_message_time = time.time()
-
-            elif msg["type"] == "error":
-                print("Ошибка сервера:", msg.get("message", ""))
-                dead = True
-
-    except Exception as e:
-        print("Disconnected:", e)
-        connected = False
-
-
-def draw_game():
-    global eat_message, kill_message
-
-    screen.fill(WHITE)
-    cam_x = player["x"] - WIDTH // 2
-    cam_y = player["y"] - HEIGHT // 2
-
-    # Рисуем границы чёрной линией
-    pygame.draw.rect(screen, BLACK, (-cam_x, -cam_y, 2000, 2000), 3)
-
-    # Рисуем еду
-    for f in foods:
-        pygame.draw.circle(screen, GREEN, (int(f["x"] - cam_x), int(f["y"] - cam_y)), 5)
-
-    # Рисуем порталы
-    for p in portals:
-        px, py = p["x"], p["y"]
-        pos = (int(px - cam_x - 20), int(py - cam_y - 20))  # центрируем по середине 40x40
-        if p["type"] == "mass":
-            if portal_img:
-                screen.blit(portal_img, pos)
-            else:
-                pygame.draw.rect(screen, (0, 255, 255), (*pos, 40, 40))  # голубой квадрат если нет картинки
-        elif p["type"] == "teleport":
-            if portal2_img:
-                screen.blit(portal2_img, pos)
-            else:
-                pygame.draw.rect(screen, (255, 0, 255), (*pos, 40, 40))  # фиолетовый квадрат если нет картинки
-
-    # Лидерборд - топ 10 по массе
-    sorted_players = sorted(players.values(), key=lambda p: p["r"], reverse=True)
-    leaderboard = sorted_players[:10]
-
-    # Рисуем в правом верхнем углу
-    x_leaderboard = WIDTH - 200
-    y_leaderboard = 10
-    header = font.render("Leaderstats (Масса)", True, BLACK)
-    screen.blit(header, (x_leaderboard, y_leaderboard))
-    y_leaderboard += 30
-
-    for i, p in enumerate(leaderboard):
-        color = GOLD if p["name"] == player["name"] and i == 0 else BLACK
-        text = font.render(f"{i+1}. {p['name']}: {p['r']}", True, color)
-        screen.blit(text, (x_leaderboard, y_leaderboard))
-        y_leaderboard += 25
-
-        # Аура вокруг игрока, если ты на первом месте
-        if p["name"] == player["name"] and i == 0:
-            # Золотая аура вокруг круга
-            aura_radius = p["r"] + 7
-            pos_x = int(p["x"] - cam_x)
-            pos_y = int(p["y"] - cam_y)
-            pygame.draw.circle(screen, GOLD, (pos_x, pos_y), aura_radius, 5)
-
-    # Рисуем игроков
-    for p in players.values():
-        color = RED if p["name"] == player["name"] else BLUE
-        pygame.draw.circle(screen, color, (int(p["x"] - cam_x), int(p["y"] - cam_y)), p["r"])
-        text = font.render(p["name"], True, BLACK)
-        screen.blit(text, (int(p["x"] - cam_x - text.get_width() / 2), int(p["y"] - cam_y - p["r"] - 20)))
-
-    # Сообщение о съедании
-    if kill_message and time.time() - kill_message_time < 3:
-        kill_text = font.render(kill_message, True, RED)
-        screen.blit(kill_text, (WIDTH // 2 - kill_text.get_width() // 2, 20))
-    else:
-        kill_message = None
-
-    # Сообщение о поедании еды
-    if eat_message and time.time() - eat_message_time < 2:
-        eat_text = font.render(eat_message, True, GREEN)
-        screen.blit(eat_text, (WIDTH // 2 - eat_text.get_width() // 2, 50))
-    else:
-        eat_message = None
-
-
-def death_screen():
-    screen.fill(WHITE)
-    text1 = font.render(f"Ты умер. Тебя съел {killer}", True, RED)
-    screen.blit(text1, (WIDTH // 2 - text1.get_width() // 2, HEIGHT // 2 - 40))
-    btn = font.render("В меню", True, BLUE)
-    pygame.draw.rect(screen, (220, 220, 220), (WIDTH // 2 - 80, HEIGHT // 2 + 10, 160, 40))
-    screen.blit(btn, (WIDTH // 2 - btn.get_width() // 2, HEIGHT // 2 + 20))
-    return pygame.Rect(WIDTH // 2 - 80, HEIGHT // 2 + 10, 160, 40)
-
-
-def menu_screen():
-    name = ""
-    input_active = True
-    while True:
-        screen.fill(WHITE)
-        title = font.render("Введите имя:", True, (0, 0, 0))
-        screen.blit(title, (WIDTH // 2 - 100, HEIGHT // 2 - 60))
-
-        pygame.draw.rect(screen, (200, 200, 255), (WIDTH // 2 - 100, HEIGHT // 2 - 20, 200, 40))
-        name_text = font.render(name, True, (0, 0, 0))
-        screen.blit(name_text, (WIDTH // 2 - 90, HEIGHT // 2 - 10))
-
-        btn = font.render("Играть", True, BLUE)
-        pygame.draw.rect(screen, (220, 220, 220), (WIDTH // 2 - 60, HEIGHT // 2 + 40, 120, 40))
-        screen.blit(btn, (WIDTH // 2 - btn.get_width() // 2, HEIGHT // 2 + 50))
-
-        pygame.display.flip()
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                exit()
-            elif event.type == pygame.KEYDOWN and input_active:
-                if event.key == pygame.K_RETURN:
-                    if name.strip():
-                        return name.strip()
-                elif event.key == pygame.K_BACKSPACE:
-                    name = name[:-1]
-                else:
-                    if len(name) < 12 and event.unicode.isprintable():
-                        name += event.unicode
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if WIDTH // 2 - 60 <= event.pos[0] <= WIDTH // 2 + 60 and HEIGHT // 2 + 40 <= event.pos[1] <= HEIGHT // 2 + 80:
-                    if name.strip():
-                        return name.strip()
-
-
-def main():
-    global dead, player, players, connected
+    # Инициализация порталов (2 шт)
+    if not portals:
+        portals = [generate_portal(1), generate_portal(2)]
 
     while True:
-        name = menu_screen()
-        dead = False
-        player = {"x": 0, "y": 0, "r": 10, "name": name}
-        players.clear()
+        # Добавляем еду
+        while len(foods) < MAX_FOOD:
+            foods.append(generate_food())
 
-        thread = threading.Thread(target=ws_thread, args=(name,), daemon=True)
-        thread.start()
-
-        while not connected:
-            time.sleep(0.1)
-
-        while not dead:
-            keys = pygame.key.get_pressed()
-            dx = dy = 0
-            speed = 5
-            if keys[pygame.K_w]: dy -= speed
-            if keys[pygame.K_s]: dy += speed
-            if keys[pygame.K_a]: dx -= speed
-            if keys[pygame.K_d]: dx += speed
-            if ws:
-                try:
-                    ws.send(json.dumps({"type": "move", "dx": dx, "dy": dy}))
-                except:
-                    pass
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    exit()
-
-            draw_game()
-            pygame.display.flip()
-            clock.tick(FPS)
-
-        # После смерти
-        while True:
-            btn_rect = death_screen()
-            pygame.display.flip()
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    exit()
-                elif event.type == pygame.MOUSEBUTTONDOWN and btn_rect.collidepoint(event.pos):
-                    connected = False
-                    try:
-                        if ws:
-                            ws.close()
-                    except:
-                        pass
-                    break
-            else:
+        # Боты поведение
+        for bot_name, bot in list(bots.items()):
+            if bot["dead"]:
                 continue
-            break
+            # Выбираем ближайшего игрока
+            if not players:
+                # Если нет игроков, боты стоят на месте
+                continue
 
+            # Возьмём рандомного игрока для простоты
+            target_name, target = random.choice(list(players.items()))
+
+            # Простое движение бота
+            speed = 3
+            dx = dy = 0
+            dist = distance(bot, target)
+            if dist == 0:
+                continue
+
+            # Если бот меньше игрока — убегает
+            if bot["r"] < target["r"]:
+                # Двигаемся от игрока
+                dx = (bot["x"] - target["x"]) / dist * speed
+                dy = (bot["y"] - target["y"]) / dist * speed
+            else:
+                # Если бот больше — охотится на игрока
+                dx = (target["x"] - bot["x"]) / dist * speed
+                dy = (target["y"] - bot["y"]) / dist * speed
+
+            bot["x"] += dx
+            bot["y"] += dy
+
+            # Ограничения по карте
+            bot["x"] = max(0, min(MAP_WIDTH, bot["x"]))
+            bot["y"] = max(0, min(MAP_HEIGHT, bot["y"]))
+
+        # Плавная потеря массы у игроков с массой >= 100 (каждые 2 секунды -1)
+        now = asyncio.get_event_loop().time()
+        for name, p in list(players.items()):
+            if p["dead"]:
+                continue
+
+            if p["r"] >= 100:
+                last_time = mass_loss_timers.get(name, 0)
+                if now - last_time > 2:
+                    p["r"] -= 1
+                    if p["r"] < 10:
+                        p["r"] = 10
+                    mass_loss_timers[name] = now
+
+        # Отправляем обновления всем
+        for name, ws in list(connections.items()):
+            try:
+                await ws.send_json({
+                    "type": "update",
+                    "players": players,
+                    "foods": foods,
+                    "portals": portals,
+                })
+            except:
+                await disconnect(name)
+
+        await asyncio.sleep(0.05)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(game_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        data = await websocket.receive_json()
+        if data["type"] != "join" or not data["name"]:
+            await websocket.close()
+            return
+        name = data["name"]
+
+        # Если игрок с таким именем уже есть
+        if name in players or name in bots:
+            await websocket.send_json({"type": "error", "message": "Имя занято"})
+            await websocket.close()
+            return
+
+        # Если есть боты, убираем одного, вместо него добавляем игрока
+        if bots:
+            bot_name, bot = bots.popitem()
+            # Можно просто удалить бота
+        pid = str(uuid.uuid4())
+        players[name] = {
+            "id": pid,
+            "x": random.randint(0, MAP_WIDTH),
+            "y": random.randint(0, MAP_HEIGHT),
+            "r": 10,
+            "name": name,
+            "dead": False,
+        }
+        connections[name] = websocket
+
+        # Обработка сообщений
+        while True:
+            msg = await websocket.receive_json()
+            if msg["type"] == "move" and not players[name]["dead"]:
+                dx, dy = msg["dx"], msg["dy"]
+                p = players[name]
+                p["x"] += dx
+                p["y"] += dy
+
+                # Ограничения карты
+                p["x"] = max(0, min(MAP_WIDTH, p["x"]))
+                p["y"] = max(0, min(MAP_HEIGHT, p["y"]))
+
+                # Съедание еды (масса растет медленно)
+                eaten_food = []
+                for food in foods:
+                    dist = ((p["x"] - food["x"])**2 + (p["y"] - food["y"])**2)**0.5
+                    if dist < p["r"]:
+                        p["r"] += 0.2  # медленное увеличение массы от еды
+                        eaten_food.append(food)
+                for food in eaten_food:
+                    foods.remove(food)
+
+                # Съедание игроков
+                for other_name, other in list(players.items()):
+                    if other_name != name and not other["dead"]:
+                        dist = ((p["x"] - other["x"])**2 + (p["y"] - other["y"])**2)**0.5
+                        if dist < p["r"] and p["r"] > other["r"] + 5:
+                            # Увеличиваем массу на 60% от массы съеденного игрока
+                            p["r"] += other["r"] * 0.6
+                            other["dead"] = True
+                            # Отправляем сообщение о съедании всем
+                            for ws_ in connections.values():
+                                try:
+                                    await ws_.send_json({
+                                        "type": "eat",
+                                        "eater": name,
+                                        "eaten": other_name,
+                                    })
+                                except:
+                                    pass
+                            # Удаляем игрока и соединение
+                            await disconnect(other_name)
+
+                # Порталы взаимодействие
+                used_portal = None
+                for portal in portals:
+                    dist = ((p["x"] - portal["x"])**2 + (p["y"] - portal["y"])**2)**0.5
+                    if dist < p["r"]:
+                        used_portal = portal
+                        break
+
+                if used_portal:
+                    if p["r"] < 150:
+                        if used_portal["type"] == 1:
+                            # Телепортируем в случайное место
+                            p["x"] = random.randint(0, MAP_WIDTH)
+                            p["y"] = random.randint(0, MAP_HEIGHT)
+                        elif used_portal["type"] == 2:
+                            # Добавляем 40 массы
+                            p["r"] += 40
+                    else:
+                        # Масса >= 150 — теряем 30%
+                        p["r"] *= 0.7
+                        if p["r"] < 10:
+                            p["r"] = 10
+
+                    # Удаляем портал после использования
+                    portals.remove(used_portal)
+
+                    # Генерируем новый портал того же типа
+                    portals.append(generate_portal(used_portal["type"]))
+
+            # Боты атака на игроков — здесь игроки не ходят, поэтому не нужен, бот ходит в game_loop
+
+    except WebSocketDisconnect:
+        await disconnect(name)
+    except Exception as e:
+        print("Ошибка:", e)
+        await disconnect(name)
+
+
+async def disconnect(name):
+    if name in connections:
+        try:
+            await connections[name].close()
+        except:
+            pass
+        del connections[name]
+    if name in players:
+        del players[name]
+    # При выходе игрока — добавляем бота взамен
+    if len(bots) < BOT_COUNT:
+        bot_id = len(bots) + 1
+        bot_name = f"бот{bot_id}"
+        bots[bot_name] = {
+            "id": str(uuid.uuid4()),
+            "x": random.randint(0, MAP_WIDTH),
+            "y": random.randint(0, MAP_HEIGHT),
+            "r": random.randint(10, 50),
+            "name": bot_name,
+            "dead": False,
+        }
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
