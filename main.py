@@ -1,6 +1,7 @@
 import asyncio
 import random
 import uuid
+import time
 from typing import Dict, List
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -23,6 +24,9 @@ BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
 BOT_SPEED = 5
+PLAYER_SPEED = 5
+MAX_ALLOWED_SPEED = 10  # Максимальная разрешенная скорость для анти-чита
+BOT_RESPAWN_TIME = 2  # Время респавна ботов в секундах
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -30,6 +34,8 @@ foods: List[dict] = []
 portals: List[dict] = []
 connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
+player_last_positions: Dict[str, dict] = {}
+player_last_move_times: Dict[str, float] = {}
 
 def generate_food():
     return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
@@ -47,6 +53,20 @@ def generate_portal():
 def calculate_mass_loss(current_mass):
     loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
     return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
+
+async def respawn_bot(bot_name):
+    await asyncio.sleep(BOT_RESPAWN_TIME)
+    bots[bot_name] = {
+        "id": str(uuid.uuid4()),
+        "x": random.randint(0, MAP_WIDTH),
+        "y": random.randint(0, MAP_HEIGHT),
+        "r": random.randint(15, 30),
+        "name": bot_name,
+        "color": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
+        "dead": False,
+        "mass_loss_timer": 0,
+        "bot": True
+    }
 
 async def bot_behavior():
     while True:
@@ -118,20 +138,9 @@ async def bot_behavior():
                     bot["r"] += 1
                 elif not is_food and min_dist < bot["r"] and closest_target["r"] < bot["r"] - 5:
                     if closest_target["name"] in bots:
-                        # Удаляем бота и создаем нового
-                        del bots[closest_target["name"]]
-                        new_bot_name = random.choice(BOT_NAMES)
-                        bots[new_bot_name] = {
-                            "id": str(uuid.uuid4()),
-                            "x": random.randint(0, MAP_WIDTH),
-                            "y": random.randint(0, MAP_HEIGHT),
-                            "r": 10,
-                            "name": new_bot_name,
-                            "color": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
-                            "dead": False,
-                            "mass_loss_timer": 0,
-                            "bot": True
-                        }
+                        # Убийство бота
+                        bots[closest_target["name"]]["dead"] = True
+                        asyncio.create_task(respawn_bot(closest_target["name"]))
                     else:
                         players[closest_target["name"]]["dead"] = True
                         try:
@@ -173,7 +182,7 @@ async def game_loop():
 
         # Потеря массы для больших игроков и ботов
         for entity in list(players.values()) + list(bots.values()):
-            if entity["r"] >= MASS_LOSS_THRESHOLD:
+            if entity["r"] >= MASS_LOSS_THRESHOLD and not entity["dead"]:
                 now = datetime.now().timestamp()
                 if "mass_loss_timer" not in entity or now - entity["mass_loss_timer"] >= MASS_LOSS_INTERVAL:
                     mass_loss = calculate_mass_loss(entity["r"])
@@ -251,6 +260,37 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+def check_speed_hack(player_name, dx, dy):
+    """Проверка на читерство со скоростью"""
+    current_time = time.time()
+    last_time = player_last_move_times.get(player_name, current_time)
+    time_diff = current_time - last_time
+    
+    # Сохраняем текущее время
+    player_last_move_times[player_name] = current_time
+    
+    # Если время между движениями слишком мало, игнорируем проверку
+    if time_diff < 0.01:
+        return False
+    
+    # Получаем последнюю позицию
+    last_pos = player_last_positions.get(player_name, {"x": players[player_name]["x"], "y": players[player_name]["y"]})
+    
+    # Рассчитываем фактическое перемещение
+    actual_dx = players[player_name]["x"] - last_pos["x"]
+    actual_dy = players[player_name]["y"] - last_pos["y"]
+    
+    # Сохраняем новую позицию
+    player_last_positions[player_name] = {"x": players[player_name]["x"], "y": players[player_name]["y"]}
+    
+    # Рассчитываем скорость
+    speed = (actual_dx**2 + actual_dy**2)**0.5 / time_diff
+    
+    # Если скорость превышает максимально допустимую
+    if speed > MAX_ALLOWED_SPEED:
+        return True
+    return False
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -279,12 +319,27 @@ async def websocket_endpoint(websocket: WebSocket):
             "mass_loss_timer": 0
         }
         connections[name] = websocket
+        player_last_positions[name] = {"x": players[name]["x"], "y": players[name]["y"]}
+        player_last_move_times[name] = time.time()
 
         # Игровой цикл для конкретного игрока
         while True:
             msg = await websocket.receive_json()
             if msg["type"] == "move" and not players[name]["dead"]:
                 dx, dy = msg["dx"], msg["dy"]
+                
+                # Проверка на читерство со скоростью
+                if check_speed_hack(name, dx, dy):
+                    print(f"Игрок {name} подозревается в использовании читов скорости!")
+                    continue
+                
+                # Ограничение скорости
+                speed = (dx**2 + dy**2)**0.5
+                if speed > PLAYER_SPEED:
+                    factor = PLAYER_SPEED / speed
+                    dx *= factor
+                    dy *= factor
+                
                 players[name]["x"] += dx
                 players[name]["y"] += dy
 
@@ -311,20 +366,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             players[name]["r"] += int(other["r"] * 0.6)
 
                             if other_name in bots:
-                                # Возрождение бота
-                                del bots[other_name]
-                                new_bot_name = random.choice(BOT_NAMES)
-                                bots[new_bot_name] = {
-                                    "id": str(uuid.uuid4()),
-                                    "x": random.randint(0, MAP_WIDTH),
-                                    "y": random.randint(0, MAP_HEIGHT),
-                                    "r": 10,
-                                    "name": new_bot_name,
-                                    "color": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
-                                    "dead": False,
-                                    "mass_loss_timer": 0,
-                                    "bot": True
-                                }
+                                # Убийство бота
+                                bots[other_name]["dead"] = True
+                                asyncio.create_task(respawn_bot(other_name))
                             else:
                                 # Убийство игрока
                                 players[other_name]["dead"] = True
@@ -360,6 +404,10 @@ async def disconnect(name: str):
         del connections[name]
     if name in players:
         del players[name]
+    if name in player_last_positions:
+        del player_last_positions[name]
+    if name in player_last_move_times:
+        del player_last_move_times[name]
 
 if __name__ == "__main__":
     import uvicorn
