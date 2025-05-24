@@ -4,60 +4,30 @@ import uuid
 from typing import Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi import Request
 from contextlib import asynccontextmanager
 
 MAP_WIDTH = 2000
 MAP_HEIGHT = 2000
 MAX_FOOD = 100
-MIN_PORTALS = 8
-MAX_PORTALS = 13
 
 players: Dict[str, dict] = {}
 foods: List[dict] = []
 connections: Dict[str, WebSocket] = {}
-portals: List[dict] = []
 
-PORTAL_TYPES = ["teleport", "mass"]
-PORTAL_RADIUS = 25
-
-# Генерация еды
 def generate_food():
     return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
 
-def generate_portal():
-    p_type = random.choice(PORTAL_TYPES)
-    return {
-        "id": str(uuid.uuid4()),
-        "x": random.randint(0, MAP_WIDTH),
-        "y": random.randint(0, MAP_HEIGHT),
-        "type": p_type
-    }
-
-async def mass_decay():
-    while True:
-        await asyncio.sleep(2)
-        for p in players.values():
-            if not p["dead"] and p["r"] >= 100:
-                p["r"] = max(10, p["r"] - 1)
-
-# Фоновая задача игры
 async def game_loop():
-    asyncio.create_task(mass_decay())
     while True:
         while len(foods) < MAX_FOOD:
             foods.append(generate_food())
-
-        while len(portals) < random.randint(MIN_PORTALS, MAX_PORTALS):
-            portals.append(generate_portal())
 
         for name, ws in list(connections.items()):
             try:
                 await ws.send_json({
                     "type": "update",
                     "players": players,
-                    "foods": foods,
-                    "portals": portals
+                    "foods": foods
                 })
             except:
                 await disconnect(name)
@@ -79,12 +49,14 @@ app = FastAPI(lifespan=lifespan)
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    name = None
     try:
         data = await websocket.receive_json()
         if data["type"] != "join" or not data["name"]:
             await websocket.close()
             return
         name = data["name"]
+
         if name in players:
             await websocket.send_json({"type": "error", "message": "Имя занято"})
             await websocket.close()
@@ -111,6 +83,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 players[name]["x"] = max(0, min(MAP_WIDTH, players[name]["x"]))
                 players[name]["y"] = max(0, min(MAP_HEIGHT, players[name]["y"]))
 
+                # Съедание еды
                 eaten = []
                 for food in foods:
                     dist = ((players[name]["x"] - food["x"])**2 + (players[name]["y"] - food["y"])**2)**0.5
@@ -125,9 +98,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     if other_name != name and not other["dead"]:
                         dist = ((players[name]["x"] - other["x"])**2 + (players[name]["y"] - other["y"])**2)**0.5
                         if dist < players[name]["r"] and players[name]["r"] > other["r"] + 5:
-                            other["dead"] = True
-                            gain = int(other["r"] * 0.6)
-                            players[name]["r"] += gain
+                            # Увеличиваем радиус убийцы на 60% радиуса жертвы
+                            players[name]["r"] += int(other["r"] * 0.6)
+
                             try:
                                 await connections[other_name].send_json({
                                     "type": "death",
@@ -135,40 +108,34 @@ async def websocket_endpoint(websocket: WebSocket):
                                 })
                             except:
                                 pass
+
+                            # Удаляем жертву
+                            del players[other_name]
                             try:
-                                await connections[name].send_json({
-                                    "type": "kill_msg",
-                                    "target": other_name
-                                })
+                                await connections[other_name].close()
                             except:
                                 pass
+                            if other_name in connections:
+                                del connections[other_name]
 
-                used_portals = []
-                for portal in portals:
-                    dist = ((players[name]["x"] - portal["x"])**2 + (players[name]["y"] - portal["y"])**2)**0.5
-                    if dist < PORTAL_RADIUS:
-                        if portal["type"] == "teleport":
-                            if players[name]["r"] < 150:
-                                players[name]["x"] = random.randint(0, MAP_WIDTH)
-                                players[name]["y"] = random.randint(0, MAP_HEIGHT)
-                            else:
-                                players[name]["r"] = int(players[name]["r"] * 0.7)
-                            used_portals.append(portal)
-                        elif portal["type"] == "mass":
-                            if players[name]["r"] < 150:
-                                players[name]["r"] += 40
-                                used_portals.append(portal)
-                            else:
-                                players[name]["r"] = int(players[name]["r"] * 0.7)
-                                used_portals.append(portal)
-                for portal in used_portals:
-                    portals.remove(portal)
+                            # Сообщаем всем о съедании
+                            for ws_name, ws_conn in list(connections.items()):
+                                try:
+                                    await ws_conn.send_json({
+                                        "type": "eat",
+                                        "killer": name,
+                                        "victim": other_name
+                                    })
+                                except:
+                                    pass
 
     except WebSocketDisconnect:
-        await disconnect(name)
+        if name:
+            await disconnect(name)
     except Exception as e:
         print("Ошибка в WebSocket:", e)
-        await disconnect(name)
+        if name:
+            await disconnect(name)
 
 async def disconnect(name: str):
     if name in connections:
