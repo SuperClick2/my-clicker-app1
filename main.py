@@ -7,17 +7,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 
 # Конфигурация игры
-MAP_WIDTH, MAP_HEIGHT = 3000, 3000
-MAX_FOOD = 200
-MAX_PORTALS = 15
-MIN_PORTALS = 10
+MAP_WIDTH, MAP_HEIGHT = 4000, 4000
+MAX_FOOD = 300
+MAX_PORTALS = 20
+MIN_PORTALS = 15
 PORTAL_RADIUS = 20
-MASS_LOSS_THRESHOLD = 150
 MASS_LOSS_INTERVAL = 1
-MIN_MASS_LOSS = 2
-MAX_MASS_LOSS = 7
-MASS_PORTAL_BONUS = 40
-MAX_PLAYER_MASS_FOR_PORTAL = 150
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
@@ -45,8 +40,32 @@ def generate_portal():
     }
 
 def calculate_mass_loss(current_mass):
-    loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
-    return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
+    if current_mass < 150:
+        return 0
+    elif current_mass < 250:
+        return 1
+    elif current_mass < 350:
+        return 2
+    elif current_mass < 450:
+        return 3
+    elif current_mass < 550:
+        return 4
+    else:
+        return 5
+
+async def spawn_bot():
+    bot_name = random.choice(BOT_NAMES)
+    bots[bot_name] = {
+        "id": str(uuid.uuid4()),
+        "x": random.randint(0, MAP_WIDTH),
+        "y": random.randint(0, MAP_HEIGHT),
+        "r": 10,
+        "name": bot_name,
+        "color": [random.randint(0, 255) for _ in range(3)],
+        "dead": False,
+        "mass_loss_timer": 0,
+        "bot": True
+    }
 
 async def bot_behavior():
     while True:
@@ -120,19 +139,9 @@ async def bot_behavior():
                     if closest_target["name"] in bots:
                         # Удаляем бота и создаем нового
                         del bots[closest_target["name"]]
-                        new_bot_name = random.choice(BOT_NAMES)
-                        bots[new_bot_name] = {
-                            "id": str(uuid.uuid4()),
-                            "x": random.randint(0, MAP_WIDTH),
-                            "y": random.randint(0, MAP_HEIGHT),
-                            "r": 10,
-                            "name": new_bot_name,
-                            "color": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
-                            "dead": False,
-                            "mass_loss_timer": 0,
-                            "bot": True
-                        }
+                        await spawn_bot()
                     else:
+                        # Убийство игрока
                         players[closest_target["name"]]["dead"] = True
                         try:
                             await connections[closest_target["name"]].send_json({
@@ -160,6 +169,11 @@ async def bot_behavior():
 
 async def game_loop():
     last_portal_spawn = datetime.now()
+    
+    # Инициализация ботов
+    for _ in range(BOT_COUNT):
+        await spawn_bot()
+
     while True:
         # Генерация еды
         while len(foods) < MAX_FOOD:
@@ -173,7 +187,7 @@ async def game_loop():
 
         # Потеря массы для больших игроков и ботов
         for entity in list(players.values()) + list(bots.values()):
-            if entity["r"] >= MASS_LOSS_THRESHOLD:
+            if entity["r"] >= 150:  # Начинаем терять массу при 150
                 now = datetime.now().timestamp()
                 if "mass_loss_timer" not in entity or now - entity["mass_loss_timer"] >= MASS_LOSS_INTERVAL:
                     mass_loss = calculate_mass_loss(entity["r"])
@@ -189,11 +203,8 @@ async def game_loop():
             for portal in portals:
                 dist = ((player["x"] - portal["x"])**2 + (player["y"] - portal["y"])**2)**0.5
                 if dist < player["r"] + portal["r"]:
-                    if player["r"] > MAX_PLAYER_MASS_FOR_PORTAL:
-                        continue
-                        
                     if portal["type"] == "mass":
-                        player["r"] += MASS_PORTAL_BONUS
+                        player["r"] += 40
                         interacted_portals.append(portal)
                     elif portal["type"] == "teleport":
                         player["x"] = random.randint(0, MAP_WIDTH)
@@ -222,21 +233,6 @@ async def game_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Создание ботов
-    for i in range(BOT_COUNT):
-        bot_name = BOT_NAMES[i] if i < len(BOT_NAMES) else f"Bot_{i+1}"
-        bots[bot_name] = {
-            "id": str(uuid.uuid4()),
-            "x": random.randint(0, MAP_WIDTH),
-            "y": random.randint(0, MAP_HEIGHT),
-            "r": random.randint(15, 30),
-            "name": bot_name,
-            "color": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
-            "dead": False,
-            "mass_loss_timer": 0,
-            "bot": True
-        }
-    
     # Запуск игровых циклов
     game_task = asyncio.create_task(game_loop())
     bot_task = asyncio.create_task(bot_behavior())
@@ -313,18 +309,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             if other_name in bots:
                                 # Возрождение бота
                                 del bots[other_name]
-                                new_bot_name = random.choice(BOT_NAMES)
-                                bots[new_bot_name] = {
-                                    "id": str(uuid.uuid4()),
-                                    "x": random.randint(0, MAP_WIDTH),
-                                    "y": random.randint(0, MAP_HEIGHT),
-                                    "r": 10,
-                                    "name": new_bot_name,
-                                    "color": (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
-                                    "dead": False,
-                                    "mass_loss_timer": 0,
-                                    "bot": True
-                                }
+                                await spawn_bot()
                             else:
                                 # Убийство игрока
                                 players[other_name]["dead"] = True
