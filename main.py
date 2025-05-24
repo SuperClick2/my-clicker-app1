@@ -5,6 +5,11 @@ from typing import Dict, List
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
+import hashlib
+import secrets
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 # Конфигурация игры
 MAP_WIDTH, MAP_HEIGHT = 3000, 3000
@@ -18,12 +23,16 @@ MIN_MASS_LOSS = 2
 MAX_MASS_LOSS = 9
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
+MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
 BOT_SPEED = 5
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
+MAX_NAME_LENGTH = 15
+MAX_CONNECTIONS = 100  # Максимальное количество подключений
+CONNECTION_RATE_LIMIT = 5  # Максимальное количество подключений в секунду
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -32,6 +41,26 @@ portals: List[dict] = []
 connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
 bot_respawn_tasks: Dict[str, asyncio.Task] = {}
+connection_times: List[datetime] = []  # Для rate limiting
+
+# Защита от DDoS
+def check_rate_limit():
+    now = datetime.now()
+    # Удаляем старые записи
+    connection_times[:] = [t for t in connection_times if (now - t).total_seconds() < 1]
+    # Проверяем количество подключений за последнюю секунду
+    return len(connection_times) < CONNECTION_RATE_LIMIT
+
+def validate_name(name: str) -> bool:
+    if not name or len(name) > MAX_NAME_LENGTH:
+        return False
+    # Проверяем, что имя содержит только допустимые символы
+    return all(c.isalnum() or c in ['_', '-'] for c in name)
+
+def validate_color(color: List[int]) -> bool:
+    if len(color) != 3:
+        return False
+    return all(0 <= c <= 255 for c in color)
 
 def generate_food():
     return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
@@ -215,6 +244,18 @@ async def game_loop():
                 if portal in portals:
                     portals.remove(portal)
 
+        # Проверка на слишком большой размер игрока
+        for name, player in list(players.items()):
+            if player["r"] > MAX_PLAYER_MASS:
+                try:
+                    await connections[name].send_json({
+                        "type": "error",
+                        "message": "Ошибка: ваш размер превысил максимально допустимый!"
+                    })
+                    await disconnect(name)
+                except:
+                    pass
+
         # Отправка обновлений всем игрокам
         all_players = {k: v for k, v in {**players, **bots}.items() if not v.get("dead", False)}
         for name, ws in list(connections.items()):
@@ -263,22 +304,71 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Настройка middleware для безопасности
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["*"],
+)
+
+# Для HTTPS можно раскомментировать
+# app.add_middleware(HTTPSRedirectMiddleware)
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # Проверка rate limiting
+    if not check_rate_limit():
+        await websocket.close()
+        return
+    
+    connection_times.append(datetime.now())
+    
+    # Проверка максимального количества подключений
+    if len(connections) >= MAX_CONNECTIONS:
+        await websocket.close()
+        return
+    
     await websocket.accept()
     name = None
     try:
         data = await websocket.receive_json()
-        if data["type"] != "join" or not data["name"]:
+        if data["type"] != "join" or not data.get("name"):
+            await websocket.send_json({"type": "error", "message": "Неверный запрос на подключение"})
             await websocket.close()
             return
+        
         name = data["name"]
-
-        if name in players or name in bots:
-            await websocket.send_json({"type": "error", "message": "Имя занято"})
+        
+        # Валидация имени
+        if not validate_name(name):
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Недопустимое имя. Используйте только буквы, цифры и _-. Максимум {MAX_NAME_LENGTH} символов."
+            })
             await websocket.close()
             return
-
+        
+        # Проверка на существующее имя
+        if name in players or name in bots:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Это имя уже занято. Пожалуйста, выберите другое."
+            })
+            await websocket.close()
+            return
+        
+        # Валидация цвета
+        color = data.get("color", [255, 0, 0])
+        if not validate_color(color):
+            color = [255, 0, 0]  # Красный по умолчанию
+        
         # Создание игрока
         players[name] = {
             "id": str(uuid.uuid4()),
@@ -286,7 +376,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "y": random.randint(0, MAP_HEIGHT),
             "r": 10,
             "name": name,
-            "color": data.get("color", [255, 0, 0]),
+            "color": color,
             "dead": False,
             "mass_loss_timer": 0
         }
