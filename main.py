@@ -1,29 +1,26 @@
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from typing import Dict, List
-import uuid
 import asyncio
 import random
-import time
+import uuid
+from typing import Dict, List
 
-app = FastAPI()
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Request
+from contextlib import asynccontextmanager
 
-# Игровая карта
+# Константы карты
 MAP_WIDTH = 2000
 MAP_HEIGHT = 2000
-
-# Игроки и еда
-players: Dict[str, dict] = {}
-foods: List[dict] = []
 MAX_FOOD = 100
 
-# Подключения
+players: Dict[str, dict] = {}
+foods: List[dict] = []
 connections: Dict[str, WebSocket] = {}
 
 # Генерация еды
 def generate_food():
     return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
 
+# Фоновая задача игры
 async def game_loop():
     while True:
         # Добавление еды
@@ -31,7 +28,7 @@ async def game_loop():
             foods.append(generate_food())
 
         # Рассылка состояния
-        for pid, ws in list(connections.items()):
+        for name, ws in list(connections.items()):
             try:
                 await ws.send_json({
                     "type": "update",
@@ -39,22 +36,36 @@ async def game_loop():
                     "foods": foods
                 })
             except:
-                await disconnect(pid)
+                await disconnect(name)
 
-        await asyncio.sleep(0.05)  # 20 FPS
+        await asyncio.sleep(0.05)
 
+# Lifespan запускает `game_loop` при старте приложения
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(game_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(lifespan=lifespan)
+
+# Подключение по WebSocket
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-
     try:
-        # Получение имени
+        # Ожидаем имя
         data = await websocket.receive_json()
         if data["type"] != "join" or not data["name"]:
             await websocket.close()
             return
         name = data["name"]
 
+        # Имя должно быть уникальным
         if name in players:
             await websocket.send_json({"type": "error", "message": "Имя занято"})
             await websocket.close()
@@ -71,21 +82,23 @@ async def websocket_endpoint(websocket: WebSocket):
         }
         connections[name] = websocket
 
-        # Обработка сообщений
+        # Обработка входящих сообщений
         while True:
             msg = await websocket.receive_json()
             if msg["type"] == "move" and not players[name]["dead"]:
-                players[name]["x"] += msg["dx"]
-                players[name]["y"] += msg["dy"]
+                dx, dy = msg["dx"], msg["dy"]
+                players[name]["x"] += dx
+                players[name]["y"] += dy
 
-                # Ограничения по карте
+                # Ограничения
                 players[name]["x"] = max(0, min(MAP_WIDTH, players[name]["x"]))
                 players[name]["y"] = max(0, min(MAP_HEIGHT, players[name]["y"]))
 
                 # Съедание еды
                 eaten = []
                 for food in foods:
-                    if ((players[name]["x"] - food["x"])**2 + (players[name]["y"] - food["y"])**2)**0.5 < players[name]["r"]:
+                    dist = ((players[name]["x"] - food["x"])**2 + (players[name]["y"] - food["y"])**2)**0.5
+                    if dist < players[name]["r"]:
                         players[name]["r"] += 1
                         eaten.append(food)
                 for food in eaten:
@@ -97,24 +110,28 @@ async def websocket_endpoint(websocket: WebSocket):
                         dist = ((players[name]["x"] - other["x"])**2 + (players[name]["y"] - other["y"])**2)**0.5
                         if dist < players[name]["r"] and players[name]["r"] > other["r"] + 5:
                             other["dead"] = True
-                            await connections[other_name].send_json({
-                                "type": "death",
-                                "killer": name
-                            })
+                            try:
+                                await connections[other_name].send_json({
+                                    "type": "death",
+                                    "killer": name
+                                })
+                            except:
+                                pass
 
     except WebSocketDisconnect:
         await disconnect(name)
+    except Exception as e:
+        print("Ошибка в WebSocket:", e)
+        await disconnect(name)
 
-async def disconnect(name):
+# Отключение игрока
+async def disconnect(name: str):
     if name in connections:
         del connections[name]
     if name in players:
         del players[name]
 
-# Фоновая задача игры
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(game_loop())
-
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+
