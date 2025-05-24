@@ -7,18 +7,19 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
 
 # Конфигурация игры
-MAP_WIDTH, MAP_HEIGHT = 4000, 4000
-MAX_FOOD = 300
-MAX_PORTALS = 20
-MIN_PORTALS = 15
+MAP_WIDTH, MAP_HEIGHT = 3000, 3000
+MAX_FOOD = 200
+MAX_PORTALS = 15
+MIN_PORTALS = 10
 PORTAL_RADIUS = 20
-MASS_LOSS_INTERVAL = 1  # секунда
-MAX_MASS_LOSS = 20      # максимальная потеря массы
+MASS_LOSS_THRESHOLD = 150
+MASS_LOSS_INTERVAL = 1
+MIN_MASS_LOSS = 2
+MAX_MASS_LOSS = 7
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
-             "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa",
-             "Bot_Lambda", "Bot_Mu", "Bot_Nu", "Bot_Xi", "Bot_Omicron"]
+             "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
 BOT_SPEED = 5
@@ -44,9 +45,8 @@ def generate_portal():
     }
 
 def calculate_mass_loss(current_mass):
-    # Потеря массы: 1 за каждые 100 массы, минимум 1, максимум 20
-    loss = max(1, min(MAX_MASS_LOSS, current_mass // 150))
-    return loss
+    loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
+    return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
 
 async def bot_behavior():
     while True:
@@ -173,11 +173,12 @@ async def game_loop():
 
         # Потеря массы для больших игроков и ботов
         for entity in list(players.values()) + list(bots.values()):
-            now = datetime.now().timestamp()
-            if "mass_loss_timer" not in entity or now - entity["mass_loss_timer"] >= MASS_LOSS_INTERVAL:
-                mass_loss = calculate_mass_loss(entity["r"])
-                entity["r"] = max(10, entity["r"] - mass_loss)
-                entity["mass_loss_timer"] = now
+            if entity["r"] >= MASS_LOSS_THRESHOLD:
+                now = datetime.now().timestamp()
+                if "mass_loss_timer" not in entity or now - entity["mass_loss_timer"] >= MASS_LOSS_INTERVAL:
+                    mass_loss = calculate_mass_loss(entity["r"])
+                    entity["r"] = max(10, entity["r"] - mass_loss)
+                    entity["mass_loss_timer"] = now
 
         # Взаимодействие с порталами
         for name, player in list(players.items()):
