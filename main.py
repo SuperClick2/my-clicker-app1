@@ -23,7 +23,7 @@ BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
 BOT_SPEED = 5
-BOT_RESPAWN_TIME = 6  # Время возрождения бота в секундах
+BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 
 # Состояние игры
 players: Dict[str, dict] = {}
