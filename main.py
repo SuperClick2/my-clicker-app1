@@ -19,11 +19,15 @@ MASS_LOSS_AMOUNT = 1
 MASS_PORTAL_BONUS = 40
 TELEPORT_PENALTY = 0.3  # 30% потери массы при телепортации если масса > 150
 MAX_PLAYER_MASS_FOR_PORTAL = 150
+BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon"]
+BOT_COUNT = 5
+BOT_UPDATE_INTERVAL = 0.5  # секунды
 
 players: Dict[str, dict] = {}
 foods: List[dict] = []
 portals: List[dict] = []
 connections: Dict[str, WebSocket] = {}
+bots: Dict[str, dict] = {}
 
 def generate_food():
     return {"x": random.randint(0, MAP_WIDTH), "y": random.randint(0, MAP_HEIGHT)}
@@ -37,6 +41,95 @@ def generate_portal():
         "type": portal_type,
         "id": str(uuid.uuid4())
     }
+
+async def bot_behavior():
+    while True:
+        for bot_name, bot in list(bots.items()):
+            if bot["dead"]:
+                continue
+                
+            # Простой ИИ ботов: двигаться к ближайшей еде или игроку меньше себя
+            closest_food = None
+            min_dist = float('inf')
+            
+            # Ищем ближайшую еду
+            for food in foods:
+                dist = ((bot["x"] - food["x"])**2 + (bot["y"] - food["y"])**2)**0.5
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_food = food
+            
+            # Ищем ближайшего игрока, которого можно съесть
+            closest_player = None
+            player_min_dist = float('inf')
+            for player_name, player in players.items():
+                if player_name != bot_name and not player["dead"] and bot["r"] > player["r"] + 5:
+                    dist = ((bot["x"] - player["x"])**2 + (bot["y"] - player["y"])**2)**0.5
+                    if dist < player_min_dist:
+                        player_min_dist = dist
+                        closest_player = player
+            
+            # Выбираем цель: либо игрока, либо еду
+            target = closest_player if closest_player and player_min_dist < 300 else closest_food
+            
+            if target:
+                # Двигаемся к цели
+                dx = target["x"] - bot["x"]
+                dy = target["y"] - bot["y"]
+                dist = (dx**2 + dy**2)**0.5
+                if dist > 0:
+                    dx = dx / dist * 3
+                    dy = dy / dist * 3
+                
+                bot["x"] += dx
+                bot["y"] += dy
+                
+                # Ограничиваем движение в пределах карты
+                bot["x"] = max(0, min(MAP_WIDTH, bot["x"]))
+                bot["y"] = max(0, min(MAP_HEIGHT, bot["y"]))
+                
+                # Съедание еды
+                eaten = []
+                for food in foods:
+                    dist = ((bot["x"] - food["x"])**2 + (bot["y"] - food["y"])**2)**0.5
+                    if dist < bot["r"]:
+                        bot["r"] += 1
+                        eaten.append(food)
+                for food in eaten:
+                    foods.remove(food)
+                
+                # Съедание игроков
+                for player_name, player in list(players.items()):
+                    if player_name != bot_name and not player["dead"]:
+                        dist = ((bot["x"] - player["x"])**2 + (bot["y"] - player["y"])**2)**0.5
+                        if dist < bot["r"] and bot["r"] > player["r"] + 5:
+                            # Увеличиваем радиус бота
+                            bot["r"] += int(player["r"] * 0.6)
+                            
+                            # Удаляем жертву
+                            players[player_name]["dead"] = True
+                            try:
+                                await connections[player_name].send_json({
+                                    "type": "death",
+                                    "killer": bot_name
+                                })
+                            except:
+                                pass
+                            
+                            # Сообщаем всем о съедании
+                            for ws_name, ws_conn in list(connections.items()):
+                                try:
+                                    await ws_conn.send_json({
+                                        "type": "eat",
+                                        "eater": bot_name,
+                                        "eaten": player_name
+                                    })
+                                except:
+                                    pass
+                
+                # Взаимодействие с порталами (боты не используют порталы)
+                
+        await asyncio.sleep(BOT_UPDATE_INTERVAL)
 
 async def game_loop():
     last_portal_spawn = datetime.now()
@@ -68,25 +161,18 @@ async def game_loop():
             for portal in portals:
                 dist = ((player["x"] - portal["x"])**2 + (player["y"] - portal["y"])**2)**0.5
                 if dist < player["r"] + portal["r"]:
-                    if portal["type"] == "mass" and player["r"] < MAX_PLAYER_MASS_FOR_PORTAL:
+                    # Игроки с массой > 150 не могут использовать порталы
+                    if player["r"] > MAX_PLAYER_MASS_FOR_PORTAL:
+                        continue
+                        
+                    if portal["type"] == "mass":
                         player["r"] += MASS_PORTAL_BONUS
                         interacted_portals.append(portal)
                     elif portal["type"] == "teleport":
-                        if player["r"] <= MAX_PLAYER_MASS_FOR_PORTAL:
-                            # Телепортация
-                            player["x"] = random.randint(0, MAP_WIDTH)
-                            player["y"] = random.randint(0, MAP_HEIGHT)
-                            interacted_portals.append(portal)
-                        else:
-                            # Штраф за использование при большой массе
-                            player["r"] = max(10, int(player["r"] * (1 - TELEPORT_PENALTY)))
-                            try:
-                                await connections[name].send_json({
-                                    "type": "message",
-                                    "text": f"Штраф за телепорт! Потеряно {TELEPORT_PENALTY*100}% массы"
-                                })
-                            except:
-                                pass
+                        # Телепортация
+                        player["x"] = random.randint(0, MAP_WIDTH)
+                        player["y"] = random.randint(0, MAP_HEIGHT)
+                        interacted_portals.append(portal)
 
             # Удаляем использованные порталы
             for portal in interacted_portals:
@@ -94,11 +180,12 @@ async def game_loop():
                     portals.remove(portal)
 
         # Отправка обновлений всем игрокам
+        all_players = {**players, **bots}
         for name, ws in list(connections.items()):
             try:
                 await ws.send_json({
                     "type": "update",
-                    "players": players,
+                    "players": all_players,
                     "foods": foods,
                     "portals": portals
                 })
@@ -109,11 +196,28 @@ async def game_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(game_loop())
+    # Создаем ботов при запуске
+    for i in range(BOT_COUNT):
+        bot_name = BOT_NAMES[i] if i < len(BOT_NAMES) else f"Bot_{i+1}"
+        bots[bot_name] = {
+            "id": str(uuid.uuid4()),
+            "x": random.randint(0, MAP_WIDTH),
+            "y": random.randint(0, MAP_HEIGHT),
+            "r": random.randint(15, 30),
+            "name": bot_name,
+            "dead": False,
+            "mass_loss_timer": 0,
+            "bot": True
+        }
+    
+    game_task = asyncio.create_task(game_loop())
+    bot_task = asyncio.create_task(bot_behavior())
     yield
-    task.cancel()
+    game_task.cancel()
+    bot_task.cancel()
     try:
-        await task
+        await game_task
+        await bot_task
     except asyncio.CancelledError:
         pass
 
@@ -130,7 +234,7 @@ async def websocket_endpoint(websocket: WebSocket):
             return
         name = data["name"]
 
-        if name in players:
+        if name in players or name in bots:
             await websocket.send_json({"type": "error", "message": "Имя занято"})
             await websocket.close()
             return
@@ -167,30 +271,38 @@ async def websocket_endpoint(websocket: WebSocket):
                 for food in eaten:
                     foods.remove(food)
 
-                # Съедание игроков
-                for other_name, other in list(players.items()):
+                # Съедание игроков и ботов
+                for other_name, other in list({**players, **bots}.items()):
                     if other_name != name and not other["dead"]:
                         dist = ((players[name]["x"] - other["x"])**2 + (players[name]["y"] - other["y"])**2)**0.5
                         if dist < players[name]["r"] and players[name]["r"] > other["r"] + 5:
                             # Увеличиваем радиус убийцы на 60% радиуса жертвы
                             players[name]["r"] += int(other["r"] * 0.6)
 
-                            try:
-                                await connections[other_name].send_json({
-                                    "type": "death",
-                                    "killer": name
-                                })
-                            except:
-                                pass
-
-                            # Удаляем жертву
-                            del players[other_name]
-                            try:
-                                await connections[other_name].close()
-                            except:
-                                pass
-                            if other_name in connections:
-                                del connections[other_name]
+                            if other_name in bots:
+                                # Удаляем бота и создаем нового
+                                del bots[other_name]
+                                new_bot_name = random.choice(BOT_NAMES)
+                                bots[new_bot_name] = {
+                                    "id": str(uuid.uuid4()),
+                                    "x": random.randint(0, MAP_WIDTH),
+                                    "y": random.randint(0, MAP_HEIGHT),
+                                    "r": random.randint(15, 30),
+                                    "name": new_bot_name,
+                                    "dead": False,
+                                    "mass_loss_timer": 0,
+                                    "bot": True
+                                }
+                            else:
+                                # Удаляем игрока
+                                players[other_name]["dead"] = True
+                                try:
+                                    await connections[other_name].send_json({
+                                        "type": "death",
+                                        "killer": name
+                                    })
+                                except:
+                                    pass
 
                             # Сообщаем всем о съедании
                             for ws_name, ws_conn in list(connections.items()):
