@@ -5,8 +5,6 @@ from typing import Dict, List
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from contextlib import asynccontextmanager
-import secrets
-import hashlib
 
 # Конфигурация игры
 MAP_WIDTH, MAP_HEIGHT = 3000, 3000
@@ -20,7 +18,6 @@ MIN_MASS_LOSS = 2
 MAX_MASS_LOSS = 9
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
-MAX_PLAYER_SIZE = 1000
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
@@ -52,12 +49,6 @@ def generate_portal():
 def calculate_mass_loss(current_mass):
     loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
     return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
-
-def generate_session_token():
-    return secrets.token_hex(16)
-
-def hash_data(data):
-    return hashlib.sha256(data.encode()).hexdigest()
 
 async def respawn_bot(bot_name: str):
     await asyncio.sleep(BOT_RESPAWN_TIME)
@@ -224,18 +215,6 @@ async def game_loop():
                 if portal in portals:
                     portals.remove(portal)
 
-        # Проверка на максимальный размер игрока
-        for name, player in list(players.items()):
-            if player["r"] > MAX_PLAYER_SIZE:
-                try:
-                    await connections[name].send_json({
-                        "type": "error",
-                        "message": "Обнаружен баг: игрок слишком большого размера"
-                    })
-                    await disconnect(name)
-                except:
-                    await disconnect(name)
-
         # Отправка обновлений всем игрокам
         all_players = {k: v for k, v in {**players, **bots}.items() if not v.get("dead", False)}
         for name, ws in list(connections.items()):
@@ -284,76 +263,33 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-async def disconnect(name: str):
-    if name in connections:
-        del connections[name]
-    if name in players:
-        del players[name]
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     name = None
-    
     try:
         data = await websocket.receive_json()
-        
-        # Валидация данных
-        if data["type"] != "join" or not isinstance(data.get("name"), str):
-            await websocket.send_json({
-                "type": "error",
-                "message": "Неверный формат данных"
-            })
+        if data["type"] != "join" or not data["name"]:
             await websocket.close()
             return
-            
-        name = data["name"].strip()
-        
-        # Проверка имени
-        if len(name) > 15 or len(name) < 1:
-            await websocket.send_json({
-                "type": "error",
-                "message": "Имя должно быть от 1 до 15 символов"
-            })
-            await websocket.close()
-            return
-            
+        name = data["name"]
+
         if name in players or name in bots:
-            await websocket.send_json({
-                "type": "error", 
-                "message": "Имя уже занято"
-            })
+            await websocket.send_json({"type": "error", "message": "Имя занято"})
             await websocket.close()
             return
-            
-        # Проверка цвета
-        color = data.get("color", [255, 0, 0])
-        if not isinstance(color, list) or len(color) != 3:
-            color = [255, 0, 0]
-        else:
-            color = [max(0, min(255, c)) for c in color]
-        
-        # Создание игрока с токеном сессии
-        session_token = generate_session_token()
+
+        # Создание игрока
         players[name] = {
             "id": str(uuid.uuid4()),
             "x": random.randint(0, MAP_WIDTH),
             "y": random.randint(0, MAP_HEIGHT),
             "r": 10,
             "name": name,
-            "color": color,
+            "color": data.get("color", [255, 0, 0]),
             "dead": False,
-            "mass_loss_timer": 0,
-            "session_token": hash_data(session_token),
-            "ip": hash_data(websocket.client.host)
+            "mass_loss_timer": 0
         }
-        
-        # Отправка токена клиенту
-        await websocket.send_json({
-            "type": "session",
-            "token": session_token
-        })
-        
         connections[name] = websocket
 
         # Игровой цикл для конкретного игрока
@@ -367,16 +303,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Ограничение движения
                 players[name]["x"] = max(0, min(MAP_WIDTH, players[name]["x"]))
                 players[name]["y"] = max(0, min(MAP_HEIGHT, players[name]["y"]))
-
-                # Проверка выхода за границы
-                if (players[name]["x"] < 0 or players[name]["x"] > MAP_WIDTH or 
-                    players[name]["y"] < 0 or players[name]["y"] > MAP_HEIGHT):
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "Вы вышли за границы карты"
-                    })
-                    await disconnect(name)
-                    return
 
                 # Съедание еды
                 eaten = []
@@ -432,6 +358,12 @@ async def websocket_endpoint(websocket: WebSocket):
         print("Ошибка в WebSocket:", e)
         if name:
             await disconnect(name)
+
+async def disconnect(name: str):
+    if name in connections:
+        del connections[name]
+    if name in players:
+        del players[name]
 
 if __name__ == "__main__":
     import uvicorn
