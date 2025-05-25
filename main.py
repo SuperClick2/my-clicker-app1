@@ -33,6 +33,8 @@ BOT_RESPAWN_TIME = 9  # Время возрождения бота в секун
 MAX_NAME_LENGTH = 15
 MAX_CONNECTIONS = 100  # Максимальное количество подключений
 CONNECTION_RATE_LIMIT = 5  # Максимальное количество подключений в секунду
+MAX_CHAT_MESSAGES = 100  # Максимальное количество сообщений в чате
+MAX_CHAT_MESSAGE_LENGTH = 200  # Максимальная длина сообщения
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -42,6 +44,7 @@ connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
 bot_respawn_tasks: Dict[str, asyncio.Task] = {}
 connection_times: List[datetime] = []  # Для rate limiting
+chat_messages: List[dict] = []  # Для хранения сообщений чата
 
 # Защита от DDoS
 def check_rate_limit():
@@ -271,7 +274,8 @@ async def game_loop():
                     "type": "update",
                     "players": all_players,
                     "foods": foods,
-                    "portals": portals
+                    "portals": portals,
+                    "chat": chat_messages[-10:] if chat_messages else []
                 })
             except:
                 await disconnect(name)
@@ -389,6 +393,16 @@ async def websocket_endpoint(websocket: WebSocket):
         }
         connections[name] = websocket
 
+        # Добавляем сообщение о подключении в чат
+        chat_messages.append({
+            "sender": "Система",
+            "message": f"{name} присоединился к игре",
+            "color": [150, 150, 150],
+            "timestamp": datetime.now().timestamp()
+        })
+        if len(chat_messages) > MAX_CHAT_MESSAGES:
+            chat_messages.pop(0)
+
         # Игровой цикл для конкретного игрока
         while True:
             msg = await websocket.receive_json()
@@ -456,6 +470,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                     })
                                 except:
                                     pass
+            elif msg["type"] == "chat" and "message" in msg:
+                # Обработка сообщения чата
+                message = msg["message"][:MAX_CHAT_MESSAGE_LENGTH]
+                chat_messages.append({
+                    "sender": name,
+                    "message": message,
+                    "color": players[name]["color"],
+                    "timestamp": datetime.now().timestamp()
+                })
+                if len(chat_messages) > MAX_CHAT_MESSAGES:
+                    chat_messages.pop(0)
 
     except WebSocketDisconnect:
         if name:
@@ -470,6 +495,15 @@ async def disconnect(name: str):
         del connections[name]
     if name in players:
         del players[name]
+        # Добавляем сообщение об отключении в чат
+        chat_messages.append({
+            "sender": "Система",
+            "message": f"{name} покинул игру",
+            "color": [150, 150, 150],
+            "timestamp": datetime.now().timestamp()
+        })
+        if len(chat_messages) > MAX_CHAT_MESSAGES:
+            chat_messages.pop(0)
 
 if __name__ == "__main__":
     import uvicorn
