@@ -10,6 +10,7 @@ import secrets
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+import math
 
 # Конфигурация игры
 MAP_WIDTH, MAP_HEIGHT = 3000, 3000
@@ -23,16 +24,18 @@ MIN_MASS_LOSS = 2
 MAX_MASS_LOSS = 9
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
-MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
+MAX_PLAYER_MASS = 1000
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
-BOT_SPEED = 5
-BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
+BASE_SPEED = 5
+BOT_SPEED = BASE_SPEED
+BOT_RESPAWN_TIME = 9
 MAX_NAME_LENGTH = 15
-MAX_CONNECTIONS = 100  # Максимальное количество подключений
-CONNECTION_RATE_LIMIT = 5  # Максимальное количество подключений в секунду
+MAX_CONNECTIONS = 100
+CONNECTION_RATE_LIMIT = 5
+BOT_STRATEGY_CHANGE_INTERVAL = 10  # Как часто боты меняют стратегию
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -41,20 +44,18 @@ portals: List[dict] = []
 connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
 bot_respawn_tasks: Dict[str, asyncio.Task] = {}
-connection_times: List[datetime] = []  # Для rate limiting
+connection_times: List[datetime] = []
+bot_strategies: Dict[str, dict] = {}  # Стратегии поведения ботов
 
 # Защита от DDoS
 def check_rate_limit():
     now = datetime.now()
-    # Удаляем старые записи
     connection_times[:] = [t for t in connection_times if (now - t).total_seconds() < 1]
-    # Проверяем количество подключений за последнюю секунду
     return len(connection_times) < CONNECTION_RATE_LIMIT
 
 def validate_name(name: str) -> bool:
     if not name or len(name) > MAX_NAME_LENGTH:
         return False
-    # Проверяем, что имя содержит только допустимые символы
     return all(c.isalnum() or c in ['_', '-'] for c in name)
 
 def validate_color(color: List[int]) -> bool:
@@ -79,6 +80,13 @@ def calculate_mass_loss(current_mass):
     loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
     return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
 
+def calculate_speed(mass):
+    # Чем больше масса, тем медленнее движение (но не менее 1)
+    return max(1, BASE_SPEED * (50 / max(10, mass)))
+
+def distance(x1, y1, x2, y2):
+    return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+
 async def respawn_bot(bot_name: str):
     await asyncio.sleep(BOT_RESPAWN_TIME)
     bots[bot_name] = {
@@ -94,62 +102,134 @@ async def respawn_bot(bot_name: str):
     }
     bot_respawn_tasks.pop(bot_name, None)
 
+def get_bot_strategy(bot_name):
+    # Определяем стратегию поведения бота
+    if bot_name not in bot_strategies or random.random() < 0.05:
+        # Выбираем случайную стратегию или меняем существующую с небольшой вероятностью
+        strategy = random.choice(["aggressive", "defensive", "balanced", "scared", "farmer"])
+        target_types = random.choices(
+            ["player", "bot", "food", "portal"],
+            weights=[0.4, 0.3, 0.2, 0.1],
+            k=2
+        )
+        bot_strategies[bot_name] = {
+            "type": strategy,
+            "preferred_targets": target_types,
+            "last_change": datetime.now()
+        }
+    return bot_strategies[bot_name]
+
 async def bot_behavior():
     while True:
         for bot_name, bot in list(bots.items()):
             if bot["dead"]:
                 continue
                 
-            # Поиск целей
+            strategy = get_bot_strategy(bot_name)
+            current_time = datetime.now()
+            
+            # Меняем стратегию, если прошло много времени
+            if (current_time - strategy["last_change"]).total_seconds() > BOT_STRATEGY_CHANGE_INTERVAL:
+                strategy = get_bot_strategy(bot_name)  # Обновляем стратегию
+            
+            # Поиск целей в зависимости от стратегии
             closest_target = None
             min_dist = float('inf')
             is_food = True
+            target_value = 0
             
-            # Проверка игроков и ботов
-            for target in {**players, **bots}.values():
-                if target["name"] != bot_name and not target["dead"]:
-                    dist = ((bot["x"] - target["x"])**2 + (bot["y"] - target["y"])**2)**0.5
+            # Анализируем все возможные цели
+            for target_type in ["players", "bots", "food", "portals"]:
+                if target_type == "players":
+                    targets = players.values()
+                elif target_type == "bots":
+                    targets = bots.values()
+                elif target_type == "food":
+                    targets = foods
+                elif target_type == "portals":
+                    targets = portals
+                
+                for target in targets:
+                    if target_type in ["players", "bots"]:
+                        if target["name"] == bot_name or target.get("dead", False):
+                            continue
+                            
+                        dist = distance(bot["x"], bot["y"], target["x"], target["y"])
+                        value = 0
+                        
+                        # Оцениваем цель в зависимости от стратегии
+                        if strategy["type"] == "aggressive":
+                            if target["r"] < bot["r"] * 0.8:
+                                value = (bot["r"] - target["r"]) / dist * 10
+                            elif target["r"] > bot["r"] * 1.2:
+                                value = -10 / dist
+                        elif strategy["type"] == "defensive":
+                            if target["r"] < bot["r"] * 0.7:
+                                value = (bot["r"] - target["r"]) / dist * 5
+                            elif target["r"] > bot["r"] * 1.1:
+                                value = -15 / dist
+                        elif strategy["type"] == "scared":
+                            if target["r"] < bot["r"] * 0.6:
+                                value = (bot["r"] - target["r"]) / dist * 3
+                            elif target["r"] > bot["r"] * 0.9:
+                                value = -20 / dist
+                        elif strategy["type"] == "farmer":
+                            value = -5 / dist  # Предпочитает избегать всех
+                        else:  # balanced
+                            if target["r"] < bot["r"] * 0.75:
+                                value = (bot["r"] - target["r"]) / dist * 7
+                            elif target["r"] > bot["r"] * 1.15:
+                                value = -10 / dist
+                        
+                        if value > target_value or (value == target_value and dist < min_dist):
+                            target_value = value
+                            min_dist = dist
+                            closest_target = target
+                            is_food = False
                     
-                    # Если цель меньше и ближе
-                    if target["r"] < bot["r"] - 5 and dist < min_dist:
-                        closest_target = target
-                        min_dist = dist
-                        is_food = False
-                    # Если цель больше и близко - убегаем
-                    elif target["r"] > bot["r"] + 5 and dist < 250:
-                        closest_target = target
-                        min_dist = dist
-                        is_food = False
-                        break
+                    elif target_type == "food" and "food" in strategy["preferred_targets"]:
+                        dist = distance(bot["x"], bot["y"], target["x"], target["y"])
+                        value = 1 / dist * (3 if strategy["type"] == "farmer" else 1)
+                        
+                        if value > target_value or (value == target_value and dist < min_dist):
+                            target_value = value
+                            min_dist = dist
+                            closest_target = target
+                            is_food = True
+                    
+                    elif target_type == "portals" and "portal" in strategy["preferred_targets"]:
+                        dist = distance(bot["x"], bot["y"], target["x"], target["y"])
+                        if target["type"] == "mass" and bot["r"] < MAX_PLAYER_MASS_FOR_PORTAL:
+                            value = 2 / dist
+                        else:
+                            value = 0.5 / dist
+                        
+                        if value > target_value or (value == target_value and dist < min_dist):
+                            target_value = value
+                            min_dist = dist
+                            closest_target = target
+                            is_food = False
             
-            # Поиск еды если нет подходящих целей
-            if closest_target is None or is_food:
-                for food in foods:
-                    dist = ((bot["x"] - food["x"])**2 + (bot["y"] - food["y"])**2)**0.5
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_target = food
-                        is_food = True
-            
-            # Движение к цели
+            # Движение к цели с учетом массы
             if closest_target:
                 dx, dy = 0, 0
                 if is_food:
                     dx = closest_target["x"] - bot["x"]
                     dy = closest_target["y"] - bot["y"]
                 else:
-                    if closest_target["r"] < bot["r"] - 5:
+                    if target_value > 0:  # Атакуем
                         dx = closest_target["x"] - bot["x"]
                         dy = closest_target["y"] - bot["y"]
-                    else:
+                    else:  # Убегаем
                         dx = bot["x"] - closest_target["x"]
                         dy = bot["y"] - closest_target["y"]
                 
-                # Нормализация вектора
-                dist = (dx**2 + dy**2)**0.5
+                # Нормализация вектора и учет массы
+                dist = math.sqrt(dx**2 + dy**2)
                 if dist > 0:
-                    dx = dx / dist * BOT_SPEED
-                    dy = dy / dist * BOT_SPEED
+                    speed = calculate_speed(bot["r"])
+                    dx = dx / dist * speed
+                    dy = dy / dist * speed
                 
                 bot["x"] += dx
                 bot["y"] += dy
@@ -226,7 +306,7 @@ async def game_loop():
                 
             interacted_portals = []
             for portal in portals:
-                dist = ((player["x"] - portal["x"])**2 + (player["y"] - portal["y"])**2)**0.5
+                dist = distance(player["x"], player["y"], portal["x"], portal["y"])
                 if dist < player["r"] + portal["r"]:
                     if player["r"] > MAX_PLAYER_MASS_FOR_PORTAL:
                         continue
@@ -287,6 +367,8 @@ async def lifespan(app: FastAPI):
             "mass_loss_timer": 0,
             "bot": True
         }
+        # Инициализация стратегии для бота
+        get_bot_strategy(bot_name)
     
     # Запуск игровых циклов
     game_task = asyncio.create_task(game_loop())
@@ -317,9 +399,6 @@ app.add_middleware(
     TrustedHostMiddleware,
     allowed_hosts=["*"],
 )
-
-# Для HTTPS можно раскомментировать
-# app.add_middleware(HTTPSRedirectMiddleware)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -367,7 +446,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # Валидация цвета
         color = data.get("color", [255, 0, 0])
         if not validate_color(color):
-            color = [255, 0, 0]  # Красный по умолчанию
+            color = [255, 0, 0]
         
         # Создание игрока
         players[name] = {
@@ -387,9 +466,17 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = await websocket.receive_json()
             if msg["type"] == "move" and not players[name]["dead"]:
                 dx, dy = msg["dx"], msg["dy"]
+                
+                # Нормализация вектора и учет массы
+                dist = math.sqrt(dx**2 + dy**2)
+                if dist > 0:
+                    speed = calculate_speed(players[name]["r"])
+                    dx = dx / dist * speed
+                    dy = dy / dist * speed
+                
                 players[name]["x"] += dx
                 players[name]["y"] += dy
-
+                
                 # Ограничение движения
                 players[name]["x"] = max(0, min(MAP_WIDTH, players[name]["x"]))
                 players[name]["y"] = max(0, min(MAP_HEIGHT, players[name]["y"]))
@@ -397,7 +484,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Съедание еды
                 eaten = []
                 for food in foods:
-                    dist = ((players[name]["x"] - food["x"])**2 + (players[name]["y"] - food["y"])**2)**0.5
+                    dist = distance(players[name]["x"], players[name]["y"], food["x"], food["y"])
                     if dist < players[name]["r"]:
                         players[name]["r"] += 1
                         eaten.append(food)
@@ -407,7 +494,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Съедание других игроков/ботов
                 for other_name, other in list({**players, **bots}.items()):
                     if other_name != name and not other.get("dead", False):
-                        dist = ((players[name]["x"] - other["x"])**2 + (players[name]["y"] - other["y"])**2)**0.5
+                        dist = distance(players[name]["x"], players[name]["y"], other["x"], other["y"])
                         if dist < players[name]["r"] and players[name]["r"] > other["r"] + 5:
                             # Удаление съеденного объекта
                             eater_name = name
