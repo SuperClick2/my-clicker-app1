@@ -24,11 +24,11 @@ MAX_MASS_LOSS = 9
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
 MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
-BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
-             "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
+BOT_NAMES = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon",
+             "Zeta", "Eta", "Theta", "Iota", "Kappa", "Fly", "Mister","Lemon"]
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
-BOT_SPEED = 5
+BOT_SPEED = 10
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 MAX_NAME_LENGTH = 15
 MAX_CONNECTIONS = 100  # Максимальное количество подключений
