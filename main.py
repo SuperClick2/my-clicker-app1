@@ -167,4 +167,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:main", host="0.0.0.0", port=8000, reload=True)
