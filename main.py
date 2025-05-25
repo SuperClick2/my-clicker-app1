@@ -27,8 +27,8 @@ MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
 BOT_NAMES = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon",
              "Zeta", "Eta", "Theta", "Iota", "Kappa", "Fly", "Mister","Lemon"]
 BOT_COUNT = 10
-BOT_UPDATE_INTERVAL = 0.1
-BOT_SPEED = 10
+BOT_UPDATE_INTERVAL = 0.09
+BOT_SPEED = 12
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 MAX_NAME_LENGTH = 15
 MAX_CONNECTIONS = 100  # Максимальное количество подключений
