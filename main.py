@@ -27,7 +27,7 @@ MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
-BOT_UPDATE_INTERVAL = 0.01
+BOT_UPDATE_INTERVAL = 0.08
 BASE_SPEED = 5  # Базовая скорость
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 MAX_NAME_LENGTH = 15
