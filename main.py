@@ -20,7 +20,7 @@ PORTAL_RADIUS = 20
 MASS_LOSS_THRESHOLD = 150
 MASS_LOSS_INTERVAL = 1
 MIN_MASS_LOSS = 2
-MAX_MASS_LOSS = 9
+MAX_MASS_LOSS = 5
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
 MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
@@ -28,7 +28,7 @@ BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.1
-BOT_SPEED = 5
+BASE_SPEED = 5  # Базовая скорость
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 MAX_NAME_LENGTH = 15
 MAX_CONNECTIONS = 100  # Максимальное количество подключений
@@ -79,6 +79,10 @@ def calculate_mass_loss(current_mass):
     loss = MIN_MASS_LOSS + (current_mass - MASS_LOSS_THRESHOLD) / 50
     return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
 
+def calculate_speed(mass):
+    # Чем больше масса, тем медленнее скорость (минимальная скорость 1)
+    return max(1, BASE_SPEED * (100 / mass)**0.5)
+
 async def respawn_bot(bot_name: str):
     await asyncio.sleep(BOT_RESPAWN_TIME)
     bots[bot_name] = {
@@ -100,6 +104,9 @@ async def bot_behavior():
             if bot["dead"]:
                 continue
                 
+            # Рассчитываем скорость бота в зависимости от его массы
+            bot_speed = calculate_speed(bot["r"])
+            
             # Поиск целей
             closest_target = None
             min_dist = float('inf')
@@ -145,11 +152,11 @@ async def bot_behavior():
                         dx = bot["x"] - closest_target["x"]
                         dy = bot["y"] - closest_target["y"]
                 
-                # Нормализация вектора
+                # Нормализация вектора и применение скорости
                 dist = (dx**2 + dy**2)**0.5
                 if dist > 0:
-                    dx = dx / dist * BOT_SPEED
-                    dy = dy / dist * BOT_SPEED
+                    dx = dx / dist * bot_speed
+                    dy = dy / dist * bot_speed
                 
                 bot["x"] += dx
                 bot["y"] += dy
@@ -386,7 +393,16 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             if msg["type"] == "move" and not players[name]["dead"]:
+                # Рассчитываем скорость игрока в зависимости от массы
+                player_speed = calculate_speed(players[name]["r"])
+                
                 dx, dy = msg["dx"], msg["dy"]
+                # Нормализация вектора и применение скорости
+                dist = (dx**2 + dy**2)**0.5
+                if dist > 0:
+                    dx = dx / dist * player_speed
+                    dy = dy / dist * player_speed
+                
                 players[name]["x"] += dx
                 players[name]["y"] += dy
 
