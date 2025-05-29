@@ -12,9 +12,9 @@ from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 # Конфигурация игры
-MAP_WIDTH, MAP_HEIGHT = 3000, 3000
-MAX_FOOD = 200
-MAX_PORTALS = 15
+MAP_WIDTH, MAP_HEIGHT = 5000, 5000  # Увеличена карта
+MAX_FOOD = 500
+MAX_PORTALS = 20
 MIN_PORTALS = 10
 PORTAL_RADIUS = 20
 MASS_LOSS_THRESHOLD = 150
@@ -23,18 +23,18 @@ MIN_MASS_LOSS = 2
 MAX_MASS_LOSS = 5
 MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
-MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
+MAX_PLAYER_MASS = 1000
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
 BOT_UPDATE_INTERVAL = 0.08
-BASE_SPEED = 5  # Базовая скорость
-BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
+BASE_SPEED = 5
+BOT_RESPAWN_TIME = 9
 MAX_NAME_LENGTH = 15
-MAX_CONNECTIONS = 100  # Максимальное количество подключений
-CONNECTION_RATE_LIMIT = 5  # Максимальное количество подключений в секунду
+MAX_CONNECTIONS = 100
+CONNECTION_RATE_LIMIT = 5
 MAX_CHAT_MESSAGES = 100  # Максимальное количество сообщений в чате
-MAX_CHAT_MESSAGE_LENGTH = 200  # Максимальная длина сообщения
+CHAT_MESSAGE_LENGTH = 200  # Максимальная длина сообщения
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -43,21 +43,18 @@ portals: List[dict] = []
 connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
 bot_respawn_tasks: Dict[str, asyncio.Task] = {}
-connection_times: List[datetime] = []  # Для rate limiting
-chat_messages: List[dict] = []  # Для хранения сообщений чата
+connection_times: List[datetime] = []
+chat_messages: List[dict] = []  # Сообщения чата: {"sender": name, "message": text, "color": color}
 
 # Защита от DDoS
 def check_rate_limit():
     now = datetime.now()
-    # Удаляем старые записи
     connection_times[:] = [t for t in connection_times if (now - t).total_seconds() < 1]
-    # Проверяем количество подключений за последнюю секунду
     return len(connection_times) < CONNECTION_RATE_LIMIT
 
 def validate_name(name: str) -> bool:
     if not name or len(name) > MAX_NAME_LENGTH:
         return False
-    # Проверяем, что имя содержит только допустимые символы
     return all(c.isalnum() or c in ['_', '-'] for c in name)
 
 def validate_color(color: List[int]) -> bool:
@@ -83,7 +80,6 @@ def calculate_mass_loss(current_mass):
     return min(MAX_MASS_LOSS, max(MIN_MASS_LOSS, loss))
 
 def calculate_speed(mass):
-    # Чем больше масса, тем медленнее скорость (минимальная скорость 1)
     return max(1, BASE_SPEED * (100 / mass)**0.5)
 
 async def respawn_bot(bot_name: str):
@@ -107,32 +103,25 @@ async def bot_behavior():
             if bot["dead"]:
                 continue
                 
-            # Рассчитываем скорость бота в зависимости от его массы
             bot_speed = calculate_speed(bot["r"])
-            
-            # Поиск целей
             closest_target = None
             min_dist = float('inf')
             is_food = True
             
-            # Проверка игроков и ботов
             for target in {**players, **bots}.values():
                 if target["name"] != bot_name and not target["dead"]:
                     dist = ((bot["x"] - target["x"])**2 + (bot["y"] - target["y"])**2)**0.5
                     
-                    # Если цель меньше и ближе
                     if target["r"] < bot["r"] - 5 and dist < min_dist:
                         closest_target = target
                         min_dist = dist
                         is_food = False
-                    # Если цель больше и близко - убегаем
                     elif target["r"] > bot["r"] + 5 and dist < 250:
                         closest_target = target
                         min_dist = dist
                         is_food = False
                         break
             
-            # Поиск еды если нет подходящих целей
             if closest_target is None or is_food:
                 for food in foods:
                     dist = ((bot["x"] - food["x"])**2 + (bot["y"] - food["y"])**2)**0.5
@@ -141,7 +130,6 @@ async def bot_behavior():
                         closest_target = food
                         is_food = True
             
-            # Движение к цели
             if closest_target:
                 dx, dy = 0, 0
                 if is_food:
@@ -155,7 +143,6 @@ async def bot_behavior():
                         dx = bot["x"] - closest_target["x"]
                         dy = bot["y"] - closest_target["y"]
                 
-                # Нормализация вектора и применение скорости
                 dist = (dx**2 + dy**2)**0.5
                 if dist > 0:
                     dx = dx / dist * bot_speed
@@ -163,17 +150,13 @@ async def bot_behavior():
                 
                 bot["x"] += dx
                 bot["y"] += dy
-                
-                # Ограничение движения
                 bot["x"] = max(0, min(MAP_WIDTH, bot["x"]))
                 bot["y"] = max(0, min(MAP_HEIGHT, bot["y"]))
                 
-                # Взаимодействие с целями
                 if is_food and min_dist < bot["r"]:
                     foods.remove(closest_target)
                     bot["r"] += 1
                 elif not is_food and min_dist < bot["r"] and closest_target["r"] < bot["r"] - 5:
-                    # Удаление съеденного объекта
                     eater_name = bot_name
                     eaten_name = closest_target["name"]
                     
@@ -191,10 +174,8 @@ async def bot_behavior():
                         except:
                             pass
                     
-                    # Увеличение массы бота
                     bot["r"] += int(closest_target["r"] * 0.6)
                     
-                    # Отправка сообщения о съедении
                     for ws_name, ws_conn in list(connections.items()):
                         try:
                             await ws_conn.send_json({
@@ -210,17 +191,14 @@ async def bot_behavior():
 async def game_loop():
     last_portal_spawn = datetime.now()
     while True:
-        # Генерация еды
         while len(foods) < MAX_FOOD:
             foods.append(generate_food())
 
-        # Генерация порталов
         current_time = datetime.now()
         if (current_time - last_portal_spawn).total_seconds() > 10 and len(portals) < MAX_PORTALS:
             portals.append(generate_portal())
             last_portal_spawn = current_time
 
-        # Потеря массы для больших игроков и ботов
         for entity in list(players.values()) + list(bots.values()):
             if not entity.get("dead", False) and entity["r"] >= MASS_LOSS_THRESHOLD:
                 now = datetime.now().timestamp()
@@ -229,7 +207,6 @@ async def game_loop():
                     entity["r"] = max(10, entity["r"] - mass_loss)
                     entity["mass_loss_timer"] = now
 
-        # Взаимодействие с порталами
         for name, player in list(players.items()):
             if player["dead"]:
                 continue
@@ -249,12 +226,10 @@ async def game_loop():
                         player["y"] = random.randint(0, MAP_HEIGHT)
                         interacted_portals.append(portal)
 
-            # Удаление использованных порталов
             for portal in interacted_portals:
                 if portal in portals:
                     portals.remove(portal)
 
-        # Проверка на слишком большой размер игрока
         for name, player in list(players.items()):
             if player["r"] > MAX_PLAYER_MASS:
                 try:
@@ -266,16 +241,41 @@ async def game_loop():
                 except:
                     pass
 
-        # Отправка обновлений всем игрокам
         all_players = {k: v for k, v in {**players, **bots}.items() if not v.get("dead", False)}
         for name, ws in list(connections.items()):
             try:
+                visible_players = {}
+                visible_foods = []
+                visible_portals = []
+                
+                # Фильтрация видимых объектов в зависимости от размера игрока
+                view_radius = min(3000, 1000 + players[name]["r"] * 10) if name in players else 1000
+                
+                player_x = players[name]["x"] if name in players else 0
+                player_y = players[name]["y"] if name in players else 0
+                
+                for p_id, p in all_players.items():
+                    dist = ((player_x - p["x"])**2 + (player_y - p["y"])**2)**0.5
+                    if dist < view_radius:
+                        visible_players[p_id] = p
+                
+                for food in foods:
+                    dist = ((player_x - food["x"])**2 + (player_y - food["y"])**2)**0.5
+                    if dist < view_radius:
+                        visible_foods.append(food)
+                
+                for portal in portals:
+                    dist = ((player_x - portal["x"])**2 + (player_y - portal["y"])**2)**0.5
+                    if dist < view_radius:
+                        visible_portals.append(portal)
+                
                 await ws.send_json({
                     "type": "update",
-                    "players": all_players,
-                    "foods": foods,
-                    "portals": portals,
-                    "chat": chat_messages[-10:] if chat_messages else []
+                    "players": visible_players,
+                    "foods": visible_foods,
+                    "portals": visible_portals,
+                    "chat": chat_messages[-20:],  # Последние 20 сообщений
+                    "your_mass": players[name]["r"] if name in players else 0
                 })
             except:
                 await disconnect(name)
@@ -284,7 +284,6 @@ async def game_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Создание ботов
     for i in range(BOT_COUNT):
         bot_name = BOT_NAMES[i] if i < len(BOT_NAMES) else f"Bot_{i+1}"
         bots[bot_name] = {
@@ -299,7 +298,6 @@ async def lifespan(app: FastAPI):
             "bot": True
         }
     
-    # Запуск игровых циклов
     game_task = asyncio.create_task(game_loop())
     bot_task = asyncio.create_task(bot_behavior())
     yield
@@ -315,7 +313,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Настройка middleware для безопасности
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -329,19 +326,14 @@ app.add_middleware(
     allowed_hosts=["*"],
 )
 
-# Для HTTPS можно раскомментировать
-# app.add_middleware(HTTPSRedirectMiddleware)
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    # Проверка rate limiting
     if not check_rate_limit():
         await websocket.close()
         return
     
     connection_times.append(datetime.now())
     
-    # Проверка максимального количества подключений
     if len(connections) >= MAX_CONNECTIONS:
         await websocket.close()
         return
@@ -357,7 +349,6 @@ async def websocket_endpoint(websocket: WebSocket):
         
         name = data["name"]
         
-        # Валидация имени
         if not validate_name(name):
             await websocket.send_json({
                 "type": "error",
@@ -366,7 +357,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
         
-        # Проверка на существующее имя
         if name in players or name in bots:
             await websocket.send_json({
                 "type": "error",
@@ -375,12 +365,10 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
         
-        # Валидация цвета
         color = data.get("color", [255, 0, 0])
         if not validate_color(color):
-            color = [255, 0, 0]  # Красный по умолчанию
+            color = [255, 0, 0]
         
-        # Создание игрока
         players[name] = {
             "id": str(uuid.uuid4()),
             "x": random.randint(0, MAP_WIDTH),
@@ -393,25 +381,21 @@ async def websocket_endpoint(websocket: WebSocket):
         }
         connections[name] = websocket
 
-        # Добавляем сообщение о подключении в чат
+        # Отправляем уведомление в чат о новом игроке
         chat_messages.append({
             "sender": "Система",
-            "message": f"{name} присоединился к игре",
-            "color": [150, 150, 150],
-            "timestamp": datetime.now().timestamp()
+            "message": f"{name} присоединился к игре!",
+            "color": [100, 100, 100]
         })
         if len(chat_messages) > MAX_CHAT_MESSAGES:
             chat_messages.pop(0)
 
-        # Игровой цикл для конкретного игрока
         while True:
             msg = await websocket.receive_json()
             if msg["type"] == "move" and not players[name]["dead"]:
-                # Рассчитываем скорость игрока в зависимости от массы
                 player_speed = calculate_speed(players[name]["r"])
                 
                 dx, dy = msg["dx"], msg["dy"]
-                # Нормализация вектора и применение скорости
                 dist = (dx**2 + dy**2)**0.5
                 if dist > 0:
                     dx = dx / dist * player_speed
@@ -419,12 +403,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 players[name]["x"] += dx
                 players[name]["y"] += dy
-
-                # Ограничение движения
                 players[name]["x"] = max(0, min(MAP_WIDTH, players[name]["x"]))
                 players[name]["y"] = max(0, min(MAP_HEIGHT, players[name]["y"]))
 
-                # Съедание еды
                 eaten = []
                 for food in foods:
                     dist = ((players[name]["x"] - food["x"])**2 + (players[name]["y"] - food["y"])**2)**0.5
@@ -434,12 +415,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 for food in eaten:
                     foods.remove(food)
 
-                # Съедание других игроков/ботов
                 for other_name, other in list({**players, **bots}.items()):
                     if other_name != name and not other.get("dead", False):
                         dist = ((players[name]["x"] - other["x"])**2 + (players[name]["y"] - other["y"])**2)**0.5
                         if dist < players[name]["r"] and players[name]["r"] > other["r"] + 5:
-                            # Удаление съеденного объекта
                             eater_name = name
                             eaten_name = other_name
                             
@@ -457,10 +436,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 except:
                                     pass
                             
-                            # Увеличение массы игрока
                             players[name]["r"] += int(other["r"] * 0.6)
                             
-                            # Отправка сообщения о съедении
                             for ws_name, ws_conn in list(connections.items()):
                                 try:
                                     await ws_conn.send_json({
@@ -470,17 +447,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                     })
                                 except:
                                     pass
-            elif msg["type"] == "chat" and "message" in msg:
-                # Обработка сообщения чата
-                message = msg["message"][:MAX_CHAT_MESSAGE_LENGTH]
-                chat_messages.append({
-                    "sender": name,
-                    "message": message,
-                    "color": players[name]["color"],
-                    "timestamp": datetime.now().timestamp()
-                })
-                if len(chat_messages) > MAX_CHAT_MESSAGES:
-                    chat_messages.pop(0)
+
+            elif msg["type"] == "chat" and not players[name]["dead"]:
+                message = msg.get("message", "").strip()[:CHAT_MESSAGE_LENGTH]
+                if message:
+                    chat_messages.append({
+                        "sender": name,
+                        "message": message,
+                        "color": players[name]["color"]
+                    })
+                    if len(chat_messages) > MAX_CHAT_MESSAGES:
+                        chat_messages.pop(0)
 
     except WebSocketDisconnect:
         if name:
@@ -495,12 +472,11 @@ async def disconnect(name: str):
         del connections[name]
     if name in players:
         del players[name]
-        # Добавляем сообщение об отключении в чат
+        # Отправляем уведомление в чат о выходе игрока
         chat_messages.append({
             "sender": "Система",
-            "message": f"{name} покинул игру",
-            "color": [150, 150, 150],
-            "timestamp": datetime.now().timestamp()
+            "message": f"{name} покинул игру.",
+            "color": [100, 100, 100]
         })
         if len(chat_messages) > MAX_CHAT_MESSAGES:
             chat_messages.pop(0)
