@@ -10,8 +10,6 @@ import secrets
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-import time
-import math
 
 # Конфигурация игры
 MAP_WIDTH, MAP_HEIGHT = 3000, 3000
@@ -29,20 +27,12 @@ MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
 BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
              "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
 BOT_COUNT = 10
-BOT_UPDATE_INTERVAL = 0.06
+BOT_UPDATE_INTERVAL = 0.08
 BASE_SPEED = 5  # Базовая скорость
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 MAX_NAME_LENGTH = 15
 MAX_CONNECTIONS = 100  # Максимальное количество подключений
 CONNECTION_RATE_LIMIT = 5  # Максимальное количество подключений в секунду
-SPLIT_COOLDOWN = 5  # Время перезарядки разделения в секундах
-MIN_SPLIT_MASS = 35  # Минимальная масса для разделения
-SPLIT_MASS_LOSS = 1.2  # Потеря массы при разделении
-MIN_MASS_TO_SPLIT = 10  # Минимальная масса осколка
-MIN_MASS_TO_EJECT = 5  # Минимальная масса для выброса
-EJECTED_MASS_SIZE = 5  # Размер выброшенной массы
-EJECTION_COOLDOWN = 0.5  # Задержка между выбросами
-HEARTBEAT_INTERVAL = 5  # Интервал проверки соединения в секундах
 
 # Состояние игры
 players: Dict[str, dict] = {}
@@ -52,10 +42,6 @@ connections: Dict[str, WebSocket] = {}
 bots: Dict[str, dict] = {}
 bot_respawn_tasks: Dict[str, asyncio.Task] = {}
 connection_times: List[datetime] = []  # Для rate limiting
-player_fragments: Dict[str, List[dict]] = {}  # Осколки игроков после разделения
-last_split_time: Dict[str, float] = {}  # Время последнего разделения
-last_ejection_time: Dict[str, float] = {}  # Время последнего выброса массы
-last_heartbeat: Dict[str, float] = {}  # Время последнего heartbeat
 
 # Защита от DDoS
 def check_rate_limit():
@@ -111,35 +97,6 @@ async def respawn_bot(bot_name: str):
         "bot": True
     }
     bot_respawn_tasks.pop(bot_name, None)
-
-async def merge_fragments(player_name: str):
-    if player_name not in player_fragments or len(player_fragments[player_name]) <= 1:
-        return
-
-    main_fragment = None
-    fragments_to_merge = []
-
-    # Находим основной фрагмент (самый большой)
-    for fragment in player_fragments[player_name]:
-        if main_fragment is None or fragment["r"] > main_fragment["r"]:
-            main_fragment = fragment
-
-    # Проверяем расстояние между фрагментами
-    for fragment in player_fragments[player_name]:
-        if fragment is not main_fragment:
-            dist = ((main_fragment["x"] - fragment["x"])**2 + (main_fragment["y"] - fragment["y"])**2)**0.5
-            if dist < main_fragment["r"] + fragment["r"]:
-                fragments_to_merge.append(fragment)
-
-    # Объединяем фрагменты
-    for fragment in fragments_to_merge:
-        main_fragment["r"] = (main_fragment["r"]**2 + fragment["r"]**2)**0.5  # Сохраняем суммарную площадь
-        player_fragments[player_name].remove(fragment)
-
-    # Если остался только один фрагмент - переносим его в основного игрока
-    if len(player_fragments[player_name]) == 1 and player_name in players:
-        players[player_name] = player_fragments[player_name][0]
-        del player_fragments[player_name]
 
 async def bot_behavior():
     while True:
@@ -306,41 +263,8 @@ async def game_loop():
                 except:
                     pass
 
-        # Проверка heartbeat
-        current_time = time.time()
-        for name in list(connections.keys()):
-            if name in last_heartbeat and current_time - last_heartbeat[name] > HEARTBEAT_INTERVAL * 2:
-                await disconnect(name)
-
-        # Обновление осколков
-        for name in list(player_fragments.keys()):
-            if name not in players:
-                continue
-                
-            for fragment in player_fragments[name]:
-                # Движение осколков
-                if "dx" in fragment and "dy" in fragment:
-                    fragment["x"] += fragment["dx"]
-                    fragment["y"] += fragment["dy"]
-                    
-                    # Замедление осколков
-                    fragment["dx"] *= 0.95
-                    fragment["dy"] *= 0.95
-                    
-                    # Ограничение движения
-                    fragment["x"] = max(0, min(MAP_WIDTH, fragment["x"]))
-                    fragment["y"] = max(0, min(MAP_HEIGHT, fragment["y"]))
-            
-            # Проверка слияния фрагментов
-            await merge_fragments(name)
-
         # Отправка обновлений всем игрокам
         all_players = {k: v for k, v in {**players, **bots}.items() if not v.get("dead", False)}
-        # Добавляем фрагменты в список игроков для отображения
-        for name, fragments in player_fragments.items():
-            for i, fragment in enumerate(fragments):
-                all_players[f"{name}_{i}"] = fragment
-
         for name, ws in list(connections.items()):
             try:
                 await ws.send_json({
@@ -464,17 +388,11 @@ async def websocket_endpoint(websocket: WebSocket):
             "mass_loss_timer": 0
         }
         connections[name] = websocket
-        last_heartbeat[name] = time.time()
-        player_fragments[name] = [players[name]]
 
         # Игровой цикл для конкретного игрока
         while True:
             msg = await websocket.receive_json()
-            if msg["type"] == "heartbeat":
-                last_heartbeat[name] = time.time()
-                continue
-                
-            if msg["type"] == "move" and name in players and not players[name]["dead"]:
+            if msg["type"] == "move" and not players[name]["dead"]:
                 # Рассчитываем скорость игрока в зависимости от массы
                 player_speed = calculate_speed(players[name]["r"])
                 
@@ -539,50 +457,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 except:
                                     pass
 
-            elif msg["type"] == "split" and name in players and not players[name]["dead"]:
-                current_time = time.time()
-                if (name not in last_split_time or current_time - last_split_time[name] > SPLIT_COOLDOWN) and players[name]["r"] >= MIN_SPLIT_MASS:
-                    last_split_time[name] = current_time
-                    
-                    # Создаем новый фрагмент
-                    new_mass = players[name]["r"] / 2
-                    if new_mass < MIN_MASS_TO_SPLIT:
-                        continue
-                        
-                    players[name]["r"] = new_mass * SPLIT_MASS_LOSS  # Основной фрагмент теряет немного массы
-                    
-                    new_fragment = {
-                        "id": str(uuid.uuid4()),
-                        "x": players[name]["x"],
-                        "y": players[name]["y"],
-                        "r": new_mass,
-                        "name": name,
-                        "color": players[name]["color"],
-                        "dead": False,
-                        "dx": msg["dx"] * 15,
-                        "dy": msg["dy"] * 15
-                    }
-                    
-                    player_fragments[name].append(new_fragment)
-
-            elif msg["type"] == "eject" and name in players and not players[name]["dead"]:
-                current_time = time.time()
-                if (name not in last_ejection_time or current_time - last_ejection_time[name] > EJECTION_COOLDOWN) and players[name]["r"] > MIN_MASS_TO_EJECT + 5:
-                    last_ejection_time[name] = current_time
-                    
-                    # Создаем выброшенную массу
-                    players[name]["r"] -= MIN_MASS_TO_EJECT
-                    if players[name]["r"] < 10:  # Минимальный размер
-                        players[name]["r"] = 10
-                        
-                    new_food = {
-                        "x": players[name]["x"] + msg["dx"] * players[name]["r"],
-                        "y": players[name]["y"] + msg["dy"] * players[name]["r"],
-                        "r": EJECTED_MASS_SIZE,
-                        "color": players[name]["color"]
-                    }
-                    foods.append(new_food)
-
     except WebSocketDisconnect:
         if name:
             await disconnect(name)
@@ -596,14 +470,6 @@ async def disconnect(name: str):
         del connections[name]
     if name in players:
         del players[name]
-    if name in player_fragments:
-        del player_fragments[name]
-    if name in last_split_time:
-        del last_split_time[name]
-    if name in last_ejection_time:
-        del last_ejection_time[name]
-    if name in last_heartbeat:
-        del last_heartbeat[name]
 
 if __name__ == "__main__":
     import uvicorn
