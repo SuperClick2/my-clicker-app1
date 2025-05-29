@@ -12,26 +12,26 @@ from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 # Конфигурация игры
-MAP_WIDTH, MAP_HEIGHT = 5000, 5000
-MAX_FOOD = 500
-MAX_PORTALS = 30
-MIN_PORTALS = 15
-PORTAL_RADIUS = 30
-MASS_LOSS_THRESHOLD = 200
+MAP_WIDTH, MAP_HEIGHT = 3000, 3000
+MAX_FOOD = 200
+MAX_PORTALS = 15
+MIN_PORTALS = 10
+PORTAL_RADIUS = 20
+MASS_LOSS_THRESHOLD = 150
 MASS_LOSS_INTERVAL = 1
 MIN_MASS_LOSS = 2
 MAX_MASS_LOSS = 5
-MASS_PORTAL_BONUS = 60
+MASS_PORTAL_BONUS = 40
 MAX_PLAYER_MASS_FOR_PORTAL = 150
 MAX_PLAYER_MASS = 1000  # Максимальный размер игрока
-BOT_NAMES = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon",
-             "Zeta", "Eta", "Theta", "Bot_Iota", "Kappa", "Lemon", "Hero", "Orange", "Crik", "Lali"]
-BOT_COUNT = 15
-BOT_UPDATE_INTERVAL = 0.05
-BASE_SPEED = 6  # Базовая скорость
+BOT_NAMES = ["Bot_Alpha", "Bot_Beta", "Bot_Gamma", "Bot_Delta", "Bot_Epsilon",
+             "Bot_Zeta", "Bot_Eta", "Bot_Theta", "Bot_Iota", "Bot_Kappa"]
+BOT_COUNT = 10
+BOT_UPDATE_INTERVAL = 0.08
+BASE_SPEED = 5  # Базовая скорость
 BOT_RESPAWN_TIME = 9  # Время возрождения бота в секундах
 MAX_NAME_LENGTH = 15
-MAX_CONNECTIONS = 150  # Максимальное количество подключений
+MAX_CONNECTIONS = 100  # Максимальное количество подключений
 CONNECTION_RATE_LIMIT = 5  # Максимальное количество подключений в секунду
 
 # Состояние игры
