@@ -10,6 +10,8 @@ import secrets
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+import time
+import math
 
 # Конфигурация игры
 MAP_WIDTH, MAP_HEIGHT = 3000, 3000
